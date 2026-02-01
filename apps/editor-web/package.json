@@ -1,0 +1,28 @@
+{
+  "name": "@render/editor-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@render/event-bus": "workspace:*",
+    "@render/graphics-kernel": "workspace:*",
+    "@render/integration-graphics": "workspace:*",
+    "@render/integration-rendering": "workspace:*",
+    "@render/renderer-canvas2d": "workspace:*",
+    "@render/ui-shell": "workspace:*",
+    "antd": "^5.23.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.7"
+  }
+}
