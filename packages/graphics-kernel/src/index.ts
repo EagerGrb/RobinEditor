@@ -20,9 +20,7 @@ export type {
 } from "./kernel/IGraphicsKernel.js";
 export { GraphicsKernel } from "./kernel/GraphicsKernel.js";
 export type {
-  DimensionModel,
   GridModel,
-  OpeningModel,
   SceneModel,
-  WallModel
+  EntityModel
 } from "./model/models.js";

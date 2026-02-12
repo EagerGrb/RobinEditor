@@ -1,5 +1,4 @@
 import type { Point, Rect } from "../math/types.js";
-import type { SnapCandidate } from "../geometry/snap.js";
 import type { DrawCommand } from "../view/drawCommands.js";
 
 export type InputModifiers = {
@@ -48,7 +47,7 @@ export function handledStop(): ToolEventResult {
   return { handled: true, propagate: false };
 }
 
-export type ToolType = "selection" | "wallDrawing" | "openingPlacement" | "dimension";
+export type ToolType = "selection" | "generic";
 
 export type SelectionState = {
   selectedIds: ReadonlySet<string>;
@@ -58,14 +57,12 @@ export type SelectionState = {
 
 export type SnapOptions = {
   enableGrid: boolean;
-  enableEndpoints: boolean;
-  enableWalls: boolean;
   thresholdPx: number;
 };
 
 export type SnapResult = {
   point: Point;
-  candidate: SnapCandidate | null;
+  candidate: { kind: "grid"; point: Point; distance: number } | null;
 };
 
 export type ToolContext = {
@@ -81,10 +78,6 @@ export type ToolContext = {
 
   translateSelected(delta: Point): void;
   deleteSelection(): void;
-
-  addWallPolyline(points: Point[]): void;
-  addOpeningAt(wallId: string, position: number, kind: "door" | "window", size: { width: number; height: number }): void;
-  addDimension(points: Point[]): void;
 
   setEphemeralDrawCommands(commands: DrawCommand[]): void;
 };

@@ -6,14 +6,11 @@ export type EditorMenuItem = {
 };
 
 export type EditorTool = {
-  type: "select" | "wall" | "opening" | "dimension";
+  type: string;
   label: string;
   shortcut?: string;
 };
 
 export type SelectionPayload =
   | { type: "none" }
-  | { type: "wall"; id: string }
-  | { type: "opening"; id: string }
-  | { type: "dimension"; id: string };
-
+  | { type: string; id: string };

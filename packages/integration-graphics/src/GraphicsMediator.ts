@@ -352,21 +352,14 @@ export class GraphicsMediator {
 
   private mapTool(tool: string): SetToolParams {
     if (tool === "select") return { type: "selection" };
-    if (tool === "wall") return { type: "wallDrawing" };
-    if (tool === "dimension") return { type: "dimension" };
-    if (tool === "opening") {
-      return { type: "openingPlacement", kind: "door", width: 900, height: 2100 };
-    }
     return { type: "selection" };
   }
 
   private mapSelection(selectedIds: string[]) {
     const first = selectedIds[0];
     if (!first) return { type: "none" } as const;
-    if (first.startsWith("wall_")) return { type: "wall", id: first } as const;
-    if (first.startsWith("opening_")) return { type: "opening", id: first } as const;
-    if (first.startsWith("dimension_")) return { type: "dimension", id: first } as const;
-    return { type: "none" } as const;
+    // Generic fallback for now
+    return { type: "generic", id: first } as const;
   }
 
   private toKeyEvent(payload: {

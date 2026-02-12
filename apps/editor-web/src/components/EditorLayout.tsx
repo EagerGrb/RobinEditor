@@ -55,10 +55,7 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
 
   const tools = useMemo<EditorTool[]>(
     () => [
-      { type: "select", label: "选择", shortcut: "V" },
-      { type: "wall", label: "墙体绘制", shortcut: "W" },
-      { type: "opening", label: "门窗放置", shortcut: "O" },
-      { type: "dimension", label: "尺寸标注", shortcut: "D" }
+      { type: "select", label: "选择", shortcut: "V" }
     ],
     [],
   );

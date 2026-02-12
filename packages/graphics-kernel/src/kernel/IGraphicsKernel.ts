@@ -13,17 +13,8 @@ export type GraphicsKernelEvent =
 
 export type GraphicsKernelEventHandler = (event: GraphicsKernelEvent) => void;
 
-export type OpeningPlacementParams = {
-  kind: "door" | "window";
-  width: number;
-  height: number;
-};
-
 export type SetToolParams =
-  | { type: "selection" }
-  | { type: "wallDrawing" }
-  | { type: "dimension" }
-  | ({ type: "openingPlacement" } & OpeningPlacementParams);
+  | { type: "selection" };
 
 export type SelectionTransformHandleType = "move" | "rotate" | "scale-nw" | "scale-ne" | "scale-se" | "scale-sw";
 
