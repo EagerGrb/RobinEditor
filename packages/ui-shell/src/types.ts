@@ -13,4 +13,4 @@ export type EditorTool = {
 
 export type SelectionPayload =
   | { type: "none" }
-  | { type: string; id: string };
+  | { type: string; id: string; metadata?: Record<string, unknown> };

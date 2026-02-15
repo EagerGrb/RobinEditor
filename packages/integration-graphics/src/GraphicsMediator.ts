@@ -324,6 +324,15 @@ export class GraphicsMediator {
           return;
         }
 
+        if (event.type === "GRAPHICS.ENTITY_UPDATED") {
+          this.bus.publish(Topics.GRAPHICS_ENTITY_UPDATED, {
+            id: event.id,
+            type: event.entityType,
+            metadata: event.metadata
+          });
+          return;
+        }
+
         if (event.type === "GRAPHICS.SCENE_CHANGED") {
           this.pendingDirtyRects = event.changes.affectedBounds.map((r) => inflateRect(r, 600));
           return;
@@ -358,8 +367,11 @@ export class GraphicsMediator {
   private mapSelection(selectedIds: string[]) {
     const first = selectedIds[0];
     if (!first) return { type: "none" } as const;
-    // Generic fallback for now
-    return { type: "generic", id: first } as const;
+
+    const scene = this.kernel.save();
+    const entity = scene.entities.find((e) => e.id === first);
+    if (!entity) return { type: "generic", id: first } as const;
+    return { type: entity.type, id: entity.id, metadata: entity.metadata } as const;
   }
 
   private toKeyEvent(payload: {

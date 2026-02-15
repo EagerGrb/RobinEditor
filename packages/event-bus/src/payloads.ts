@@ -1,4 +1,4 @@
-export type UIToolType = string;
+export type UIToolType = "select" | "wall" | "opening" | "dimension";
 
 export type UICommandPayload = {
   command: string;
@@ -16,42 +16,9 @@ export type UIObjectPropertiesChangedPayload = {
 
 export type GraphicsSelectionPayload =
   | { type: "none" }
-  | { type: string; id: string };
-
-export type RectPayload = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
-
-export type GraphicsSelectionSetPayload = {
-  selectedIds: string[];
-  bounds: RectPayload | null;
-};
-
-export type TransformHandleType = "move" | "rotate" | "scale-nw" | "scale-ne" | "scale-se" | "scale-sw";
-
-export type InputTransformHandleStartPayload = {
-  handleType: TransformHandleType;
-  x: number;
-  y: number;
-  modifiers: NormalizedModifiers;
-  timestamp: number;
-};
-
-export type InputTransformHandleDragPayload = {
-  handleType: TransformHandleType;
-  x: number;
-  y: number;
-  modifiers: NormalizedModifiers;
-  timestamp: number;
-};
-
-export type InputTransformHandleEndPayload = {
-  handleType: TransformHandleType;
-  timestamp: number;
-};
+  | { type: "wall"; id: string }
+  | { type: "opening"; id: string }
+  | { type: "dimension"; id: string };
 
 export type NormalizedModifiers = {
   altKey: boolean;
@@ -103,13 +70,44 @@ export type InputViewportZoomPayload = {
   x: number;
   y: number;
   deltaY: number;
+  modifiers: NormalizedModifiers;
   timestamp: number;
 };
 
-export type InputClickPayload = {
+export type ViewportPanChangedPayload = {
+  offsetX: number;
+  offsetY: number;
+  scale: number;
+};
+
+export type ViewportZoomChangedPayload = {
+  scale: number;
+};
+
+export type InputMouseDownPayload = {
   x: number;
   y: number;
   buttons: number;
+  button: number;
+  pointerId: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputMouseMovePayload = {
+  x: number;
+  y: number;
+  buttons: number;
+  pointerId: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputMouseUpPayload = {
+  x: number;
+  y: number;
+  buttons: number;
+  button: number;
   pointerId: number;
   modifiers: NormalizedModifiers;
   timestamp: number;
@@ -124,38 +122,78 @@ export type InputDoubleClickPayload = {
   timestamp: number;
 };
 
-export type InputKeyDownPayload = {
+export type InputWheelPayload = {
+  x: number;
+  y: number;
+  deltaX: number;
+  deltaY: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputContextMenuPayload = {
+  x: number;
+  y: number;
+  buttons: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputKeyPayload = {
   key: string;
   code: string;
   modifiers: NormalizedModifiers;
   timestamp: number;
 };
 
-export type InputKeyUpPayload = {
-  key: string;
-  code: string;
-  modifiers: NormalizedModifiers;
-  timestamp: number;
+export type CanvasReadyPayload = {
+  canvas: HTMLCanvasElement;
 };
 
-export type InputCanvasResizedPayload = {
+export type CanvasResizedPayload = {
   width: number;
   height: number;
   dpr: number;
 };
 
-export type ViewportZoomChangedPayload = {
-  scale: number;
+export type LogEventPayload = {
+  topic: string;
+  payload: unknown;
 };
 
-export type ViewportPanChangedPayload = {
-  offsetX: number;
-  offsetY: number;
-  scale: number;
+export type TopicPayloadMap = {
+  "UI.COMMAND": UICommandPayload;
+  "UI.TOOL_CHANGED": UIToolChangedPayload;
+  "UI.OBJECT_PROPERTIES_CHANGED": UIObjectPropertiesChangedPayload;
+
+  "VIEWPORT.PAN_CHANGED": ViewportPanChangedPayload;
+  "VIEWPORT.ZOOM_CHANGED": ViewportZoomChangedPayload;
+
+  "GRAPHICS.SELECTION_CHANGED": GraphicsSelectionPayload;
+  "GRAPHICS.RENDER_UPDATED": unknown;
+
+  "INPUT.BOX_SELECTION_START": InputBoxSelectionStartPayload;
+  "INPUT.BOX_SELECTION_CHANGE": InputBoxSelectionChangePayload;
+  "INPUT.BOX_SELECTION_END": InputBoxSelectionEndPayload;
+
+  "INPUT.VIEWPORT_PAN_START": InputViewportPanStartPayload;
+  "INPUT.VIEWPORT_PAN_MOVE": InputViewportPanMovePayload;
+  "INPUT.VIEWPORT_PAN_END": InputViewportPanEndPayload;
+  "INPUT.VIEWPORT_ZOOM": InputViewportZoomPayload;
+
+  "INPUT.MOUSE_DOWN": InputMouseDownPayload;
+  "INPUT.MOUSE_MOVE": InputMouseMovePayload;
+  "INPUT.MOUSE_UP": InputMouseUpPayload;
+  "INPUT.DOUBLE_CLICK": InputDoubleClickPayload;
+  "INPUT.WHEEL": InputWheelPayload;
+  "INPUT.CONTEXT_MENU": InputContextMenuPayload;
+  "INPUT.KEY_DOWN": InputKeyPayload;
+  "INPUT.KEY_UP": InputKeyPayload;
+  "INPUT.CANVAS_READY": CanvasReadyPayload;
+  "INPUT.CANVAS_RESIZED": CanvasResizedPayload;
+
+  "LOG.EVENT": LogEventPayload;
+  "RENDER.STATS": unknown;
 };
 
-export type GraphicsRenderUpdatedPayload = {
-  commands: unknown[]; // Type cycle avoidance, actual type is DrawCommand[]
-  dirtyRects: RectPayload[];
-  viewTransform: { a: number; b: number; c: number; d: number; e: number; f: number };
-};
+export type KnownTopic = keyof TopicPayloadMap;

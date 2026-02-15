@@ -7,6 +7,7 @@ import type { InputKeyEvent, InputPointerEvent, ToolType } from "../tools/Tool.j
 export type GraphicsKernelEvent =
   | { type: "GRAPHICS.SCENE_CHANGED"; changes: SceneChangeSet }
   | { type: "GRAPHICS.SELECTION_CHANGED"; selectedIds: string[] }
+  | { type: "GRAPHICS.ENTITY_UPDATED"; id: string; entityType: string; metadata: Record<string, unknown> }
   | { type: "GRAPHICS.DRAW_COMMANDS_CHANGED"; commands: DrawCommand[]; viewTransform: Transform2D }
   | { type: "VIEWPORT.PAN_CHANGED"; offsetX: number; offsetY: number; scale: number }
   | { type: "VIEWPORT.ZOOM_CHANGED"; scale: number };

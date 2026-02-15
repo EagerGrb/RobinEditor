@@ -5,7 +5,6 @@ import type {
   IRenderer2D,
   Point,
   Rect,
-  Transform2D,
   RendererDiagnostics,
   RendererOptions,
   SceneDrawData
@@ -91,12 +90,10 @@ function mergeOverlappingRects(rects: Rect[]): Rect[] {
     for (let i = 0; i < result.length; i++) {
       const existing = result[i];
       if (!existing) continue;
-      if (existing === merged) continue;
       if (rectsOverlap(existing, merged)) {
-        const next = mergeRects(existing, merged);
-        result[i] = next;
+        result[i] = mergeRects(existing, merged);
         didMerge = true;
-        merged = next;
+        merged = result[i];
         i = -1;
       }
     }
@@ -237,53 +234,6 @@ function layerOrder(layer: number | undefined): number {
   return layer ?? 0;
 }
 
-function identityTransform2D(): Transform2D {
-  return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
-}
-
-function invertTransform2D(t: Transform2D): Transform2D | null {
-  const det = t.a * t.d - t.b * t.c;
-  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
-  const invDet = 1 / det;
-  const a = t.d * invDet;
-  const b = -t.b * invDet;
-  const c = -t.c * invDet;
-  const d = t.a * invDet;
-  const e = (t.c * t.f - t.d * t.e) * invDet;
-  const f = (t.b * t.e - t.a * t.f) * invDet;
-  return { a, b, c, d, e, f };
-}
-
-function applyTransform2D(t: Transform2D, p: Point): Point {
-  return { x: t.a * p.x + t.c * p.y + t.e, y: t.b * p.x + t.d * p.y + t.f };
-}
-
-function rectFromPoints2D(points: Point[]): Rect {
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const p of points) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-  }
-  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
-    return { x: 0, y: 0, width: 0, height: 0 };
-  }
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-function worldRectFromScreenRect(screenRect: Rect, screenToWorld: Transform2D | null): Rect | null {
-  if (!screenToWorld) return null;
-  const p0 = applyTransform2D(screenToWorld, { x: screenRect.x, y: screenRect.y });
-  const p1 = applyTransform2D(screenToWorld, { x: screenRect.x + screenRect.width, y: screenRect.y });
-  const p2 = applyTransform2D(screenToWorld, { x: screenRect.x + screenRect.width, y: screenRect.y + screenRect.height });
-  const p3 = applyTransform2D(screenToWorld, { x: screenRect.x, y: screenRect.y + screenRect.height });
-  return rectFromPoints2D([p0, p1, p2, p3]);
-}
-
 function resolveStyle(command: DrawCommand): ResolvedStyle {
   const state: DrawCommandState = command.state ?? "normal";
   const stateOverride = STATE_OVERRIDES[state];
@@ -341,8 +291,6 @@ export class Canvas2DRenderer implements IRenderer2D {
   private width = 0;
   private height = 0;
 
-  private viewTransform: Transform2D = identityTransform2D();
-
   private sceneCommands: DrawCommand[] = [];
   private sorted: SortedCommand[] = [];
 
@@ -383,10 +331,6 @@ export class Canvas2DRenderer implements IRenderer2D {
     this.sceneCommands = data.commands;
     this.sorted = this.sortCommands(this.sceneCommands);
 
-    if (data.viewTransform) {
-      this.viewTransform = data.viewTransform;
-    }
-
     const useDirtyRects = this.options.useDirtyRects === true;
     const fullRedraw = data.fullRedraw === true || !useDirtyRects;
     if (fullRedraw) {
@@ -411,25 +355,13 @@ export class Canvas2DRenderer implements IRenderer2D {
     let drawCalls = 0;
     let stateChanges = 0;
 
-    const screenToWorld = invertTransform2D(this.viewTransform);
-    const dpr = this.dpr;
-
     const pending = this.pendingDirtyRects;
     const useDirtyRects = this.options.useDirtyRects === true;
     const dirtyRects = useDirtyRects && pending.length > 0 ? mergeOverlappingRects(pending) : [];
     this.pendingDirtyRects = [];
 
     if (!useDirtyRects || dirtyRects.length === 0) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.clearRegion(null);
-      ctx.setTransform(
-        dpr * this.viewTransform.a,
-        dpr * this.viewTransform.b,
-        dpr * this.viewTransform.c,
-        dpr * this.viewTransform.d,
-        dpr * this.viewTransform.e,
-        dpr * this.viewTransform.f
-      );
       const stats = this.drawCommands(ctx, this.sorted, null);
       drawCalls += stats.drawCalls;
       stateChanges += stats.stateChanges;
@@ -439,22 +371,11 @@ export class Canvas2DRenderer implements IRenderer2D {
         if (!clipped) continue;
 
         ctx.save();
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.beginPath();
         ctx.rect(clipped.x, clipped.y, clipped.width, clipped.height);
         ctx.clip();
         this.clearRegion(clipped);
-
-        ctx.setTransform(
-          dpr * this.viewTransform.a,
-          dpr * this.viewTransform.b,
-          dpr * this.viewTransform.c,
-          dpr * this.viewTransform.d,
-          dpr * this.viewTransform.e,
-          dpr * this.viewTransform.f
-        );
-        const worldClip = worldRectFromScreenRect(clipped, screenToWorld);
-        const stats = this.drawCommands(ctx, this.sorted, worldClip);
+        const stats = this.drawCommands(ctx, this.sorted, clipped);
         drawCalls += stats.drawCalls;
         stateChanges += stats.stateChanges;
         ctx.restore();
@@ -755,3 +676,4 @@ export class Canvas2DRenderer implements IRenderer2D {
     }
   }
 }
+

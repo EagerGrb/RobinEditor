@@ -1,2 +1,9 @@
-export type { GraphicsKernelEvent, IGraphicsKernel, InputKeyEvent, InputPointerEvent, SetToolParams } from "./contracts";
+export type {
+  GraphicsSelection,
+  IGraphicsKernel,
+  NormalizedKeyboardEvent,
+  NormalizedModifiers,
+  NormalizedPointerEvent
+} from "./contracts";
 export { GraphicsMediator } from "./GraphicsMediator";
+

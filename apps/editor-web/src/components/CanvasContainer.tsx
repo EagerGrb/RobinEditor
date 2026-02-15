@@ -263,33 +263,7 @@ export function CanvasContainer({ bus, onCanvas }: CanvasContainerProps) {
         return;
       }
 
-      const isMod = event.ctrlKey || event.metaKey;
-      const keyLower = event.key.toLowerCase();
-
-      if (isMod && !event.shiftKey && keyLower === "z") {
-        event.preventDefault();
-        bus.publish(Topics.UI_COMMAND, { command: "EDIT.UNDO" });
-        return;
-      }
-
-      if (isMod && ((event.shiftKey && keyLower === "z") || keyLower === "y")) {
-        event.preventDefault();
-        bus.publish(Topics.UI_COMMAND, { command: "EDIT.REDO" });
-        return;
-      }
-
-      if (isMod && keyLower === "0") {
-        event.preventDefault();
-        bus.publish(Topics.UI_COMMAND, { command: "VIEW.ZOOM_RESET" });
-        return;
-      }
-
-      if (!isMod && !event.repeat) {
-        if (keyLower === "v") bus.publish(Topics.UI_TOOL_CHANGED, { tool: "select" });
-        else if (keyLower === "w") bus.publish(Topics.UI_TOOL_CHANGED, { tool: "wall" });
-        else if (keyLower === "o") bus.publish(Topics.UI_TOOL_CHANGED, { tool: "opening" });
-        else if (keyLower === "d") bus.publish(Topics.UI_TOOL_CHANGED, { tool: "dimension" });
-      }
+      if (event.defaultPrevented) return;
 
       if ((event.key === "Backspace" || event.key === "Delete") && event.repeat) {
         event.preventDefault();

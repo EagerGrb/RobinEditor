@@ -6,6 +6,7 @@ import { RenderingMediator } from "@render/integration-rendering";
 import { Canvas2DRenderer } from "@render/renderer-canvas2d";
 import {
   EditorShell,
+  DialogHost,
   LogPanel,
   PropertyPanel,
   StatusBar,
@@ -15,6 +16,7 @@ import {
   type EditorTool
 } from "@render/ui-shell";
 import { CanvasContainer } from "./CanvasContainer";
+import { ShortcutManager } from "../shortcuts/ShortcutManager";
 
 export type EditorLayoutProps = {
   bus: EventBus;
@@ -69,6 +71,9 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
   useEffect(() => {
     if (!canvas) return;
 
+    const shortcuts = new ShortcutManager(bus, canvas);
+    shortcuts.attach();
+
     const kernel = new GraphicsKernel();
     const graphicsMediator = new GraphicsMediator(bus, kernel);
     graphicsMediator.attach();
@@ -100,6 +105,7 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
 
     return () => {
       unsubResize();
+      shortcuts.detach();
       renderingMediator.detach();
       graphicsMediator.detach();
       renderer.destroy();
@@ -150,7 +156,12 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
           snapEnabled={snapEnabled}
         />
       }
-      canvas={<CanvasContainer bus={bus} onCanvas={setCanvas} />}
+      canvas={
+        <>
+          <CanvasContainer bus={bus} onCanvas={setCanvas} />
+          <DialogHost bus={bus} />
+        </>
+      }
     />
   );
 }

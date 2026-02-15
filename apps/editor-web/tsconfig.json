@@ -1,7 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    "rootDir": "./src"
   },
   "include": ["src", "vite.config.ts"]
 }
+

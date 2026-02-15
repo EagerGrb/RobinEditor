@@ -43,6 +43,39 @@ export type PolygonCommand = DrawCommandBase & {
   points: Point[];
 };
 
+export type BezierCommand = DrawCommandBase & {
+  kind: "bezier";
+  p0: Point;
+  p1: Point;
+  p2: Point;
+  p3: Point;
+};
+
+export type PathSegment =
+  | { kind: "line"; a: Point; b: Point }
+  | {
+      kind: "arc";
+      center: Point;
+      radius: number;
+      startAngle: number;
+      endAngle: number;
+      anticlockwise?: boolean;
+    }
+  | { kind: "bezier"; p0: Point; p1: Point; p2: Point; p3: Point };
+
+export type PathCommand = DrawCommandBase & {
+  kind: "path";
+  segments: PathSegment[];
+  closed?: boolean;
+};
+
+export type PolygonHolesCommand = DrawCommandBase & {
+  kind: "polygonHoles";
+  exterior: Point[];
+  holes: Point[][];
+  fillRule?: CanvasFillRule;
+};
+
 export type ArcCommand = DrawCommandBase & {
   kind: "arc";
   center: Point;
@@ -80,8 +113,10 @@ export type DrawCommand =
   | LineCommand
   | PolylineCommand
   | PolygonCommand
+  | BezierCommand
+  | PathCommand
+  | PolygonHolesCommand
   | ArcCommand
   | CircleCommand
   | TextCommand
   | ImageCommand;
-

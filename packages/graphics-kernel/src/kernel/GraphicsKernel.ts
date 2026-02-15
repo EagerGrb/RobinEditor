@@ -1,10 +1,11 @@
 import type { DrawCommand } from "../view/drawCommands.js";
 import { ViewGenerator } from "../view/ViewGenerator.js";
 import type { Point, Rect, Transform2D } from "../math/types.js";
-import { rectFromPoints, rectIntersects, rectUnion } from "../math/rect.js";
+import { rectFromPoints, rectUnion } from "../math/rect.js";
 import { applyTransformToPoint, identityTransform, invertTransform } from "../math/transform.js";
 import type { SceneModel, EntityModel } from "../model/models.js";
 import { SceneManager, type SceneChangeSet } from "../scene/SceneManager.js";
+import { createId } from "../scene/id.js";
 import { ToolChain } from "../tools/ToolChain.js";
 import type { InputKeyEvent, InputPointerEvent, SelectionState, SnapOptions, SnapResult, ToolContext, ToolType } from "../tools/Tool.js";
 import { SelectionTool } from "../tools/SelectionTool.js";
@@ -16,68 +17,22 @@ import type {
   SetToolParams
 } from "./IGraphicsKernel.js";
 import { snapToGrid } from "../geometry/snap.js";
-
-export interface ICommand {
-  execute(): void;
-  undo(): void;
-}
-
-class CommandManager {
-  private undoStack: ICommand[] = [];
-  private redoStack: ICommand[] = [];
-
-  constructor(private readonly limit: number) {}
-
-  reset(): void {
-    this.undoStack = [];
-    this.redoStack = [];
-  }
-
-  executeCommand(cmd: ICommand): void {
-    cmd.execute();
-    this.recordExecutedCommand(cmd);
-  }
-
-  recordExecutedCommand(cmd: ICommand): void {
-    this.undoStack.push(cmd);
-    if (this.undoStack.length > this.limit) {
-      this.undoStack = this.undoStack.slice(this.undoStack.length - this.limit);
-    }
-    this.redoStack = [];
-  }
-
-  undo(): void {
-    const cmd = this.undoStack.pop();
-    if (!cmd) return;
-    cmd.undo();
-    this.redoStack.push(cmd);
-  }
-
-  redo(): void {
-    const cmd = this.redoStack.pop();
-    if (!cmd) return;
-    cmd.execute();
-    this.undoStack.push(cmd);
-    if (this.undoStack.length > this.limit) {
-      this.undoStack = this.undoStack.slice(this.undoStack.length - this.limit);
-    }
-  }
-
-  canUndo(): boolean {
-    return this.undoStack.length > 0;
-  }
-
-  canRedo(): boolean {
-    return this.redoStack.length > 0;
-  }
-}
+import type { ICommand } from "../history/ICommand.js";
+import { HistoryManager } from "../history/HistoryManager.js";
 
 class SnapshotSceneCommand implements ICommand {
+  readonly id: string;
+  readonly label: string;
+
   constructor(
     private readonly applySnapshot: (scene: SceneModel) => void,
     private readonly before: SceneModel,
     private readonly after: SceneModel,
-  ) {}
+    label: string,
+  ) {
+    this.id = createId("cmd_snapshot");
+    this.label = label;
+  }
 
   execute(): void {
     this.applySnapshot(this.after);
@@ -92,8 +47,7 @@ export class GraphicsKernel implements IGraphicsKernel {
   private handlers = new Set<GraphicsKernelEventHandler>();
 
   private historyReplaying = false;
-  private historyLimit = 100;
-  private commandManager = new CommandManager(this.historyLimit);
+  private history = new HistoryManager({ maxStackSize: 100 });
 
   private lastViewportEmitted: { scale: number; offsetX: number; offsetY: number } | null = null;
 
@@ -153,7 +107,7 @@ export class GraphicsKernel implements IGraphicsKernel {
   }
 
   reset(): void {
-    this.commandManager.reset();
+    this.history.reset();
     this.resetGesture();
     const changes = this.scene.reset();
     this.selection.selectedIds.clear();
@@ -166,7 +120,7 @@ export class GraphicsKernel implements IGraphicsKernel {
   }
 
   load(scene: SceneModel): void {
-    this.commandManager.reset();
+    this.history.reset();
     this.resetGesture();
     const changes = this.scene.load(scene);
     this.selection.selectedIds.clear();
@@ -292,8 +246,6 @@ export class GraphicsKernel implements IGraphicsKernel {
     for (const id of this.selection.selectedIds) {
       const entity = baseline.entities.find((e) => e.id === id);
       if (entity) {
-          // Store original state if needed for transform logic
-          // For now just tracking bounds
         bounds = bounds ? rectUnion(bounds, entity.boundingBox) : entity.boundingBox;
       }
     }
@@ -332,43 +284,39 @@ export class GraphicsKernel implements IGraphicsKernel {
 
   setObjectProperties(id: string, patch: Record<string, unknown>): void {
     const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
+    const changes = this.scene.updateEntity(id, { metadata: patch });
+    if (changes.updated.length === 0) return;
 
-    // Generic property update
-    const entity = this.scene.getEntity(id);
-    if (entity) {
-         // TODO: Implement generic update
-         // this.scene.updateEntity(id, patch);
+    const next = this.scene.getEntity(id);
+    if (next) {
+      this.emit({ type: "GRAPHICS.ENTITY_UPDATED", id: next.id, entityType: next.type, metadata: next.metadata });
     }
 
-    // Since we don't have generic update implemented yet, just return
-    // Real implementation would look like:
-    /*
-    const changes = this.scene.updateEntity(id, patch);
-    if (changes.updated.length > 0) {
-        this.recordSceneMutation();
-        if (baseline) {
-             this.commandManager.recordExecutedCommand(new SnapshotSceneCommand(...));
-        }
-        this.emit(...)
-        this.recomputeDrawCommands();
+    this.recordSceneMutation();
+    this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes });
+    this.recomputeDrawCommands();
+
+    if (baseline) {
+      this.history.pushExecuted(
+        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), "Change Properties"),
+      );
     }
-    */
   }
 
   undo(): void {
-    this.commandManager.undo();
+    this.history.undo();
   }
 
   redo(): void {
-    this.commandManager.redo();
+    this.history.redo();
   }
 
   canUndo(): boolean {
-    return this.commandManager.canUndo();
+    return this.history.canUndo();
   }
 
   canRedo(): boolean {
-    return this.commandManager.canRedo();
+    return this.history.canRedo();
   }
 
   getDrawCommands(): DrawCommand[] {
@@ -470,8 +418,8 @@ export class GraphicsKernel implements IGraphicsKernel {
     if (pointerId != null && this.gesture.pointerId != null && pointerId !== this.gesture.pointerId) return;
 
     if (!this.historyReplaying && this.gesture.baseline && this.gesture.hasChanges) {
-      this.commandManager.recordExecutedCommand(
-        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), this.gesture.baseline, this.scene.save()),
+      this.history.pushExecuted(
+        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), this.gesture.baseline, this.scene.save(), "Gesture"),
       );
     }
     this.resetGesture();
@@ -533,7 +481,7 @@ export class GraphicsKernel implements IGraphicsKernel {
       },
       snapPoint: (p: Point, options: SnapOptions): SnapResult => this.snapPoint(p, options),
       hitTest: (p: Point, thresholdPx: number): string | null => this.hitTestPoint(p, thresholdPx),
-      hitTestRect: (rect: Rect): string[] => this.hitTestRect(rect),
+      hitTestRect: (rect: Rect, mode?: "intersect" | "contain"): string[] => this.hitTestRect(rect, mode),
       translateSelected: (delta: Point) => {
         this.translateSelected(delta);
       },
@@ -583,12 +531,22 @@ export class GraphicsKernel implements IGraphicsKernel {
   private hitTestPoint(p: Point, thresholdPx: number): string | null {
     const thresholdWorld = this.thresholdWorldFromPx(thresholdPx);
 
+    const queryRect: Rect = {
+      x: p.x - thresholdWorld,
+      y: p.y - thresholdWorld,
+      width: thresholdWorld * 2,
+      height: thresholdWorld * 2
+    };
+
+    const candidateIds = this.scene.queryIds(queryRect);
+
     let bestId: string | null = null;
     let bestMetric = Infinity;
 
-    for (const entity of this.scene.getAllEntities()) {
+    for (const id of candidateIds) {
+      const entity = this.scene.getEntity(id);
+      if (!entity) continue;
       const r = entity.boundingBox;
-      // Simple rect hit test for now
       if (p.x >= r.x - thresholdWorld && p.x <= r.x + r.width + thresholdWorld &&
           p.y >= r.y - thresholdWorld && p.y <= r.y + r.height + thresholdWorld) {
           
@@ -606,11 +564,22 @@ export class GraphicsKernel implements IGraphicsKernel {
     return bestId;
   }
 
-  private hitTestRect(rect: Rect): string[] {
+  private hitTestRect(rect: Rect, mode: "intersect" | "contain" = "intersect"): string[] {
+    const candidates = this.scene.queryIds(rect);
+    if (mode === "intersect") return candidates;
+
     const hits: string[] = [];
-    for (const entity of this.scene.getAllEntities()) {
-      if (rectIntersects(rect, entity.boundingBox)) {
-        hits.push(entity.id);
+    for (const id of candidates) {
+      const entity = this.scene.getEntity(id);
+      if (!entity) continue;
+      const b = entity.boundingBox;
+      if (
+        b.x >= rect.x &&
+        b.y >= rect.y &&
+        b.x + b.width <= rect.x + rect.width &&
+        b.y + b.height <= rect.y + rect.height
+      ) {
+        hits.push(id);
       }
     }
     return hits;
@@ -620,27 +589,85 @@ export class GraphicsKernel implements IGraphicsKernel {
     if (delta.x === 0 && delta.y === 0) return;
     if (this.selection.selectedIds.size === 0) return;
 
-    // TODO: Implement generic translation
+    const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
+    const changesets: SceneChangeSet[] = [];
+
+    for (const id of this.selection.selectedIds) {
+      const entity = this.scene.getEntity(id);
+      if (!entity) continue;
+
+      changesets.push(
+        this.scene.updateEntity(id, {
+          transform: { ...entity.transform, e: entity.transform.e + delta.x, f: entity.transform.f + delta.y },
+          boundingBox: { ...entity.boundingBox, x: entity.boundingBox.x + delta.x, y: entity.boundingBox.y + delta.y }
+        }),
+      );
+    }
+
+    const merged = mergeChangesets(changesets);
+    if (merged.updated.length === 0 && merged.removed.length === 0 && merged.added.length === 0) return;
+
+    this.recordSceneMutation();
+    this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes: merged });
+    this.recomputeDrawCommands();
+
+    if (baseline) {
+      this.history.pushExecuted(
+        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), "Move Entities"),
+      );
+    }
   }
 
   private deleteSelection(): void {
     if (this.selection.selectedIds.size === 0) return;
 
     const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
-    this.recordSceneMutation();
     const changesets: SceneChangeSet[] = [];
     for (const id of this.selection.selectedIds) {
       changesets.push(this.scene.removeEntity(id));
     }
     this.selection.selectedIds.clear();
     this.emitSelection();
-    
-    // Generic merge logic for changesets needed
-    // const merged = mergeChangesets(changesets);
 
-    // Placeholder
+    const merged = mergeChangesets(changesets);
+    this.recordSceneMutation();
+    if (merged.added.length || merged.updated.length || merged.removed.length) {
+      this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes: merged });
+    }
     this.recomputeDrawCommands();
+
+    if (baseline) {
+      this.history.pushExecuted(
+        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), "Delete Entities"),
+      );
+    }
   }
+}
+
+function mergeChangesets(changesets: SceneChangeSet[]): SceneChangeSet {
+  const added = new Set<string>();
+  const updated = new Set<string>();
+  const removed = new Set<string>();
+  const affectedBounds: Rect[] = [];
+
+  for (const cs of changesets) {
+    for (const id of cs.added) added.add(id);
+    for (const id of cs.updated) updated.add(id);
+    for (const id of cs.removed) removed.add(id);
+    affectedBounds.push(...cs.affectedBounds);
+  }
+
+  for (const id of removed) {
+    added.delete(id);
+    updated.delete(id);
+  }
+
+  return {
+    added: Array.from(added),
+    updated: Array.from(updated),
+    removed: Array.from(removed),
+    affectedBounds
+  };
 }
 
 function clampNumber(v: number, min: number, max: number): number {
