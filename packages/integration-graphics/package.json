@@ -15,7 +15,8 @@
   },
   "dependencies": {
     "@render/event-bus": "workspace:*",
-    "@render/graphics-kernel": "workspace:*"
+    "@render/graphics-kernel": "workspace:*",
+    "@render/geometry": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

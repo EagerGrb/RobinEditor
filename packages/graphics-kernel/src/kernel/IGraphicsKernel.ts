@@ -1,5 +1,5 @@
 import type { Point, Rect, Transform2D } from "../math/types.js";
-import type { SceneModel } from "../model/models.js";
+import type { EntityModel, SceneModel } from "../model/models.js";
 import type { SceneChangeSet } from "../scene/SceneManager.js";
 import type { DrawCommand } from "../view/drawCommands.js";
 import type { InputKeyEvent, InputPointerEvent, ToolType } from "../tools/Tool.js";
@@ -15,7 +15,12 @@ export type GraphicsKernelEvent =
 export type GraphicsKernelEventHandler = (event: GraphicsKernelEvent) => void;
 
 export type SetToolParams =
-  | { type: "selection" };
+  | { type: "selection" }
+  | { type: "track" }
+  | { type: "arc" }
+  | { type: "bezier" }
+  | { type: "pad" }
+  | { type: "via" };
 
 export type SelectionTransformHandleType = "move" | "rotate" | "scale-nw" | "scale-ne" | "scale-se" | "scale-sw";
 
@@ -59,6 +64,11 @@ export interface IGraphicsKernel {
   getDrawCommands(): DrawCommand[];
   getSelection(): string[];
   getSelectionBounds(): Rect | null;
+
+  setEphemeralDrawCommands(commands: DrawCommand[]): void;
+  setGhostEntity(entity: EntityModel | null): void;
+
+  pasteEntities(templates: EntityModel[], options: { offset: Point; label?: string; select?: boolean }): string[];
 }
 
 export type { InputKeyEvent, InputPointerEvent, ToolType, InputPointerEventType } from "../tools/Tool.js";

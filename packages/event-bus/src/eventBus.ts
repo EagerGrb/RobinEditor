@@ -15,72 +15,106 @@ export type EventBusMiddleware = (
   bus: EventBus,
 ) => void;
 
-export type EventBus = {
+export interface RpcRequestPayload {
+  requestId: string;
+  args: any[];
+}
+
+export interface RpcResponsePayload<T = unknown> {
+  requestId: string;
+  result?: T;
+  error?: string;
+}
+
+export class EventBus {
+  private handlersByTopic = new Map<EventBusTopic, Set<EventBusHandler>>();
+  private middlewares: EventBusMiddleware[] = [];
+
+  constructor(options?: { middlewares?: EventBusMiddleware[] }) {
+    this.middlewares = options?.middlewares ?? [];
+  }
+
+  rpcService(service: string, methods: Record<string, (...args: any[]) => any>): void {
+    for (const [methodName, methodImpl] of Object.entries(methods)) {
+      const requestTopic = `rpc:request:${service}:${methodName}`;
+
+      this.subscribe(requestTopic, async (payload: any) => {
+        const { requestId, args } = payload as { requestId: string; args: any[] };
+        const responseTopic = `rpc:response:${service}:${methodName}:${requestId}`;
+
+        try {
+          const result = await methodImpl(...args);
+          this.publish(responseTopic, { requestId, result });
+        } catch (error: any) {
+          this.publish(responseTopic, { requestId, error: error.message || String(error) });
+        }
+      });
+    }
+  }
+
+  rpcCall<TResult = unknown>(service: string, method: string, ...args: any[]): Promise<TResult> {
+    return new Promise((resolve, reject) => {
+      const requestId = Math.random().toString(36).substring(2, 15);
+      const requestTopic = `rpc:request:${service}:${method}`;
+      const responseTopic = `rpc:response:${service}:${method}:${requestId}`;
+
+      const unsubscribe = this.subscribe(responseTopic, (payload: any) => {
+        const { result, error } = payload as { result: TResult; error?: string };
+
+        unsubscribe();
+
+        if (error) {
+          reject(new Error(error));
+        } else {
+          resolve(result as TResult);
+        }
+      });
+
+      this.publish(requestTopic, { requestId, args });
+    });
+  }
+
   subscribe<TTopic extends KnownTopic>(
     topic: TTopic,
     handler: EventBusHandler<TopicPayloadMap[TTopic]>,
   ): Unsubscribe;
   subscribe<TPayload>(topic: EventBusTopic, handler: EventBusHandler<TPayload>): Unsubscribe;
+  subscribe(topic: EventBusTopic, handler: EventBusHandler<unknown>): Unsubscribe {
+    const set = this.handlersByTopic.get(topic) ?? new Set<EventBusHandler>();
+    set.add(handler as EventBusHandler);
+    this.handlersByTopic.set(topic, set);
+
+    return () => {
+      this.unsubscribe(topic, handler);
+    };
+  }
 
   unsubscribe<TTopic extends KnownTopic>(
     topic: TTopic,
     handler: EventBusHandler<TopicPayloadMap[TTopic]>,
   ): void;
   unsubscribe<TPayload>(topic: EventBusTopic, handler: EventBusHandler<TPayload>): void;
+  unsubscribe(topic: EventBusTopic, handler: EventBusHandler<unknown>): void {
+    const set = this.handlersByTopic.get(topic);
+    if (!set) return;
+    set.delete(handler as EventBusHandler);
+    if (set.size === 0) this.handlersByTopic.delete(topic);
+  }
 
   publish<TTopic extends KnownTopic>(topic: TTopic, payload: TopicPayloadMap[TTopic]): void;
   publish<TPayload>(topic: EventBusTopic, payload: TPayload): void;
-};
-
-export function createEventBus(options?: { middlewares?: EventBusMiddleware[] }): EventBus {
-  const handlersByTopic = new Map<EventBusTopic, Set<EventBusHandler>>();
-  const middlewares = options?.middlewares ?? [];
-  const bus = {} as EventBus;
-
-  function subscribe<TTopic extends KnownTopic>(
-    topic: TTopic,
-    handler: EventBusHandler<TopicPayloadMap[TTopic]>,
-  ): Unsubscribe;
-  function subscribe<TPayload>(topic: EventBusTopic, handler: EventBusHandler<TPayload>): Unsubscribe;
-  function subscribe(topic: EventBusTopic, handler: EventBusHandler<unknown>): Unsubscribe {
-    const set = handlersByTopic.get(topic) ?? new Set<EventBusHandler>();
-    set.add(handler as EventBusHandler);
-    handlersByTopic.set(topic, set);
-
-    return () => {
-      const current = handlersByTopic.get(topic);
-      if (!current) return;
-      current.delete(handler as EventBusHandler);
-      if (current.size === 0) handlersByTopic.delete(topic);
-    };
-  }
-
-  function unsubscribe<TTopic extends KnownTopic>(
-    topic: TTopic,
-    handler: EventBusHandler<TopicPayloadMap[TTopic]>,
-  ): void;
-  function unsubscribe<TPayload>(topic: EventBusTopic, handler: EventBusHandler<TPayload>): void;
-  function unsubscribe(topic: EventBusTopic, handler: EventBusHandler<unknown>): void {
-    const set = handlersByTopic.get(topic);
-    if (!set) return;
-    set.delete(handler as EventBusHandler);
-    if (set.size === 0) handlersByTopic.delete(topic);
-  }
-
-  function publish<TTopic extends KnownTopic>(topic: TTopic, payload: TopicPayloadMap[TTopic]): void;
-  function publish<TPayload>(topic: EventBusTopic, payload: TPayload): void;
-  function publish(topic: EventBusTopic, payload: unknown): void {
+  publish(topic: EventBusTopic, payload: unknown): void {
     const event = { topic, payload: payload as unknown };
 
     const dispatch = () => {
-      const set = handlersByTopic.get(topic);
+      const set = this.handlersByTopic.get(topic);
       if (!set) return;
       for (const handler of set) {
         handler(payload);
       }
     };
 
-    if (middlewares.length === 0) {
+    if (this.middlewares.length === 0) {
       dispatch();
       return;
     }
@@ -89,21 +123,25 @@ export function createEventBus(options?: { middlewares?: EventBusMiddleware[] })
     const run = (i: number) => {
       if (i <= index) return;
       index = i;
-      const middleware = middlewares[i];
+      const middleware = this.middlewares[i];
       if (!middleware) {
         dispatch();
         return;
       }
-      middleware(event, () => run(i + 1), bus);
+      middleware(event, () => run(i + 1), this);
     };
 
     run(0);
   }
 
-  bus.subscribe = subscribe;
-  bus.unsubscribe = unsubscribe;
-  bus.publish = publish;
-  return bus;
+  destroy(): void {
+    this.handlersByTopic.clear();
+    this.middlewares = [];
+  }
+}
+
+export function createEventBus(options?: { middlewares?: EventBusMiddleware[] }): EventBus {
+  return new EventBus(options);
 }
 
 export function createEventLoggerMiddleware(options: {

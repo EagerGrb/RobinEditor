@@ -3,6 +3,7 @@ import "../styles.css";
 
 export type EditorShellProps = {
   top: ReactNode;
+  toolbar?: ReactNode;
   left: ReactNode;
   right: ReactNode;
   bottom: ReactNode;
@@ -10,10 +11,13 @@ export type EditorShellProps = {
   canvas: ReactNode;
 };
 
-export function EditorShell({ top, left, right, bottom, status, canvas }: EditorShellProps) {
+export function EditorShell({ top, toolbar, left, right, bottom, status, canvas }: EditorShellProps) {
   return (
     <div className="uiShellRoot">
-      <div className="uiShellTop">{top}</div>
+      <div className="uiShellTop">
+        {top}
+        {toolbar}
+      </div>
       <div className="uiShellLeft">{left}</div>
       <div className="uiShellCanvas">{canvas}</div>
       <div className="uiShellRight">{right}</div>

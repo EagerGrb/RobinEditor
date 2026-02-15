@@ -6,9 +6,10 @@ import { type EditorTool } from "../types";
 export type ToolPanelProps = {
   bus: EventBus;
   tools: EditorTool[];
+  direction?: "vertical" | "horizontal";
 };
 
-export function ToolPanel({ bus, tools }: ToolPanelProps) {
+export function ToolPanel({ bus, tools, direction = "vertical" }: ToolPanelProps) {
   const [active, setActive] = useState<EditorTool["type"]>("select");
 
   useEffect(() => {
@@ -18,7 +19,17 @@ export function ToolPanel({ bus, tools }: ToolPanelProps) {
   }, [bus]);
 
   return (
-    <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+    <div
+      style={{
+        padding: 10,
+        display: "flex",
+        flexDirection: direction === "vertical" ? "column" : "row",
+        gap: 8,
+        height: direction === "vertical" ? "100%" : "auto",
+        width: direction === "vertical" ? "auto" : "100%",
+        overflow: "auto",
+      }}
+    >
       {tools.map((tool) => {
         const selected = tool.type === active;
         const text = tool.shortcut ? `${tool.label} (${tool.shortcut})` : tool.label;

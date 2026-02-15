@@ -1,0 +1,21 @@
+{
+  "name": "@render/geometry",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Geometry algorithms for Render",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc",
+    "test": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node --test dist/test"
+  }
+}

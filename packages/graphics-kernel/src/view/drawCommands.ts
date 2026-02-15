@@ -5,5 +5,10 @@ export type {
   LineCommand,
   PolylineCommand,
   PolygonCommand,
-  TextCommand
+  TextCommand,
+  PathCommand,
+  PathSegment,
+  CircleCommand,
+  ArcCommand,
+  BezierCommand
 } from "@render/rendering-core";

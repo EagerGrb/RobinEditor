@@ -78,7 +78,6 @@ export function CanvasContainer({ bus, onCanvas }: CanvasContainerProps) {
     let lastPanPoint: { x: number; y: number } | null = null;
 
     const onMouseDown = (event: MouseEvent) => {
-      if (transformDragRef.current?.active) return;
       canvas.focus();
 
       if (event.button === 0) {
@@ -88,6 +87,30 @@ export function CanvasContainer({ bus, onCanvas }: CanvasContainerProps) {
       }
 
       if (event.button === 2) {
+        if (transformDragRef.current?.active) {
+          const handleType = transformDragRef.current.handleType;
+          transformDragRef.current = null;
+          bus.publish(Topics.INPUT_TRANSFORM_HANDLE_END, {
+            handleType,
+            timestamp: event.timeStamp
+          });
+        }
+
+        if (leftDown) {
+          leftDown = false;
+          leftDownStart = null;
+          boxActive = false;
+          const point = getScreenPoint(event);
+          bus.publish(Topics.INPUT_MOUSE_UP, {
+            ...point,
+            buttons: 0,
+            button: 0,
+            pointerId: 1,
+            modifiers: normalizedModifiers(event),
+            timestamp: event.timeStamp
+          });
+        }
+
         panActive = true;
         lastPanPoint = getScreenPoint(event);
         bus.publish(Topics.INPUT_VIEWPORT_PAN_START, {
@@ -111,6 +134,7 @@ export function CanvasContainer({ bus, onCanvas }: CanvasContainerProps) {
       const point = getScreenPoint(event);
 
       if (transformDragRef.current?.active) {
+        if ((event.buttons & 2) === 2) return;
         bus.publish(Topics.INPUT_TRANSFORM_HANDLE_DRAG, {
           handleType: transformDragRef.current.handleType,
           x: point.x,
@@ -226,17 +250,16 @@ export function CanvasContainer({ bus, onCanvas }: CanvasContainerProps) {
     };
 
     const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
       const modifiers = normalizedModifiers(event);
-      const shouldZoom = modifiers.ctrlKey || modifiers.metaKey;
-      if (shouldZoom) {
-        event.preventDefault();
-        bus.publish(Topics.INPUT_VIEWPORT_ZOOM, {
-          ...getScreenPoint(event),
-          deltaY: event.deltaY,
-          modifiers,
-          timestamp: event.timeStamp
-        });
-      }
+      
+      bus.publish(Topics.INPUT_VIEWPORT_ZOOM, {
+        ...getScreenPoint(event),
+        deltaY: event.deltaY,
+        modifiers,
+        timestamp: event.timeStamp
+      });
+
       bus.publish(Topics.INPUT_WHEEL, {
         ...getScreenPoint(event),
         deltaX: event.deltaX,
@@ -421,7 +444,7 @@ export function CanvasContainer({ bus, onCanvas }: CanvasContainerProps) {
             />
           </div>
 
-          <div style={{ position: "absolute", inset: 0, pointerEvents: "auto" }}>
+          <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
             <div
               onMouseDown={onHandleMouseDown("rotate")}
               style={{

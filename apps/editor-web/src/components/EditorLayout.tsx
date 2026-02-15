@@ -11,9 +11,13 @@ import {
   PropertyPanel,
   StatusBar,
   ToolPanel,
+  ToolToolbar,
   TopMenuBar,
+  LeftPanel,
   type EditorMenuItem,
-  type EditorTool
+  type EditorTool,
+  type LayerModel,
+  type LibraryItem
 } from "@render/ui-shell";
 import { CanvasContainer } from "./CanvasContainer";
 import { ShortcutManager } from "../shortcuts/ShortcutManager";
@@ -40,7 +44,9 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
         children: [
           { key: "view.zoomReset", label: "缩放重置", command: "VIEW.ZOOM_RESET" },
           { key: "view.fit", label: "适配视口", command: "VIEW.FIT" },
-          { key: "view.gridToggle", label: "网格开关", command: "VIEW.GRID_TOGGLE" }
+          { key: "view.gridToggle", label: "网格开关", command: "VIEW.GRID_TOGGLE" },
+          { key: "view.intersectionDemo", label: "求交演示", command: "DEBUG.INTERSECTION_DEMO" },
+          { key: "view.intersectionClear", label: "清除求交演示", command: "DEBUG.INTERSECTION_CLEAR" }
         ]
       },
       {
@@ -48,7 +54,9 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
         label: "编辑",
         children: [
           { key: "edit.undo", label: "撤销", command: "EDIT.UNDO" },
-          { key: "edit.redo", label: "重做", command: "EDIT.REDO" }
+          { key: "edit.redo", label: "重做", command: "EDIT.REDO" },
+          { key: "edit.copy", label: "复制", command: "EDIT.COPY" },
+          { key: "edit.paste", label: "粘贴", command: "EDIT.PASTE" }
         ]
       }
     ],
@@ -63,10 +71,21 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
   );
 
   const [activeTool, setActiveTool] = useState<EditorTool["type"]>("select");
-  const [mouse, setMouse] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  // const [mouse, setMouse] = useState<{ x: number; y: number }>({ x: 0, y: 0 }); // Removed, handled in StatusBar
   const [zoom, setZoom] = useState<number>(1);
   const [snapEnabled, setSnapEnabled] = useState<boolean>(true);
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
+
+  // Mock Data for LeftPanel
+  const [layers, setLayers] = useState<LayerModel[]>([
+    { id: "L1", name: "Top Layer", visible: true, locked: false, color: "#FF0000", type: "signal" },
+    { id: "L2", name: "Bottom Layer", visible: true, locked: false, color: "#0000FF", type: "signal" },
+  ]);
+  const [activeLayerId, setActiveLayerId] = useState("L1");
+  const [libraryItems] = useState<LibraryItem[]>([
+    { id: "C1", name: "Resistor 0402", thumbnail: "" },
+    { id: "C2", name: "Capacitor 0603", thumbnail: "" },
+  ]);
 
   useEffect(() => {
     if (!canvas) return;
@@ -112,11 +131,11 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
     };
   }, [bus, canvas]);
 
-  useEffect(() => {
-    return bus.subscribe(Topics.INPUT_MOUSE_MOVE, (payload) => {
-      setMouse({ x: payload.x, y: payload.y });
-    });
-  }, [bus]);
+  // useEffect(() => {
+  //   return bus.subscribe(Topics.INPUT_MOUSE_MOVE, (payload) => {
+  //     setMouse({ x: payload.x, y: payload.y });
+  //   });
+  // }, [bus]);
 
   useEffect(() => {
     return bus.subscribe(Topics.VIEWPORT_ZOOM_CHANGED, (payload) => {
@@ -126,7 +145,7 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
 
   useEffect(() => {
     return bus.subscribe(Topics.UI_TOOL_CHANGED, (payload) => {
-      setActiveTool(payload.tool);
+      setActiveTool(prev => prev !== payload.tool ? payload.tool : prev);
     });
   }, [bus]);
 
@@ -144,14 +163,50 @@ export function EditorLayout({ bus }: EditorLayoutProps) {
 
   return (
     <EditorShell
-      top={<TopMenuBar bus={bus} items={menuItems} />}
-      left={<ToolPanel bus={bus} tools={tools} />}
+      top={
+        <div style={{ display: "flex", flexDirection: "column", borderBottom: "1px solid #303030" }}>
+          <div style={{ height: 44 }}>
+            <TopMenuBar bus={bus} items={menuItems} />
+          </div>
+        </div>
+      }
+      left={
+        <div style={{ display: "flex", flexDirection: "row", height: "100%" }}>
+          <ToolToolbar bus={bus} />
+          <div style={{ flex: 1, height: "100%", overflow: "hidden" }}>
+            <LeftPanel
+              layerProps={{
+                layers,
+                activeLayerId,
+                onToggleVisible: (id) => {
+                  setLayers((prev) =>
+                    prev.map((l) => (l.id === id ? { ...l, visible: !l.visible } : l))
+                  );
+                },
+                onToggleLock: (id) => {
+                  setLayers((prev) =>
+                    prev.map((l) => (l.id === id ? { ...l, locked: !l.locked } : l))
+                  );
+                },
+                onSetActive: setActiveLayerId,
+              }}
+              libraryProps={{
+                items: libraryItems,
+                onDragStart: (item) => {
+                  console.log("Drag start", item);
+                },
+              }}
+            />
+          </div>
+        </div>
+      }
       right={<PropertyPanel bus={bus} />}
       bottom={<LogPanel bus={bus} />}
       status={
         <StatusBar
+          bus={bus}
           activeTool={activeTool}
-          mouse={mouse}
+          // mouse={mouse}
           zoom={zoom}
           snapEnabled={snapEnabled}
         />

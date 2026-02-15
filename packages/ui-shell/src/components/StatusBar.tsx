@@ -1,14 +1,31 @@
 import { Tag } from "antd";
 import { type EditorTool } from "../types";
+import { useEffect, useState } from "react";
+import { Topics, type EventBus } from "@render/event-bus";
 
 export type StatusBarProps = {
+  bus: EventBus;
   activeTool: EditorTool["type"];
-  mouse: { x: number; y: number };
   zoom: number;
   snapEnabled: boolean;
 };
 
-export function StatusBar({ activeTool, mouse, zoom, snapEnabled }: StatusBarProps) {
+export function StatusBar({ bus, activeTool, zoom, snapEnabled }: StatusBarProps) {
+  const [mouse, setMouse] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  useEffect(() => {
+    // Throttle update: only update max 30fps to avoid React render spam
+    let lastTime = 0;
+    const unsubscribe = bus.subscribe(Topics.INPUT_MOUSE_MOVE, (payload) => {
+      const now = Date.now();
+      if (now - lastTime > 32) { // ~30 FPS
+        setMouse({ x: payload.x, y: payload.y });
+        lastTime = now;
+      }
+    });
+    return unsubscribe;
+  }, [bus]);
+
   const percent = zoom * 100;
   const zoomText = percent < 10 ? "<10%" : percent > 800 ? ">800%" : `${Math.round(percent)}%`;
 
