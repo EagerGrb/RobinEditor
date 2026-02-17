@@ -64,11 +64,10 @@ export interface IGraphicsKernel {
   getDrawCommands(): DrawCommand[];
   getSelection(): string[];
   getSelectionBounds(): Rect | null;
+  exportEntities(ids: string[]): EntityModel[];
+  pasteEntities(entities: EntityModel[], options?: { offset?: Point; select?: boolean }): string[];
 
-  setEphemeralDrawCommands(commands: DrawCommand[]): void;
-  setGhostEntity(entity: EntityModel | null): void;
-
-  pasteEntities(templates: EntityModel[], options: { offset: Point; label?: string; select?: boolean }): string[];
+  runIntersectionDebug(): void;
 }
 
 export type { InputKeyEvent, InputPointerEvent, ToolType, InputPointerEventType } from "../tools/Tool.js";

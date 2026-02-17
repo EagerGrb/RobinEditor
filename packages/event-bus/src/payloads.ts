@@ -1,4 +1,4 @@
-export type UIToolType = "select" | "wall" | "opening" | "dimension";
+export type UIToolType = string;
 
 export type UICommandPayload = {
   command: string;
@@ -14,11 +14,64 @@ export type UIObjectPropertiesChangedPayload = {
   patch: Record<string, unknown>;
 };
 
+export type DialogType = "ALERT" | "CONFIRM" | "PROMPT" | "CUSTOM";
+
+export type DialogRequestPayload = {
+  id: string;
+  type: DialogType;
+  title: string;
+  content?: string;
+  component?: string;
+  props?: Record<string, unknown>;
+  onConfirm?: (data: unknown) => void;
+  onCancel?: () => void;
+};
+
 export type GraphicsSelectionPayload =
   | { type: "none" }
-  | { type: "wall"; id: string }
-  | { type: "opening"; id: string }
-  | { type: "dimension"; id: string };
+  | { type: string; id: string; metadata?: Record<string, unknown> };
+
+export type GraphicsEntityUpdatedPayload = {
+  id: string;
+  type: string;
+  metadata: Record<string, unknown>;
+};
+
+export type RectPayload = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type GraphicsSelectionSetPayload = {
+  selectedIds: string[];
+  bounds: RectPayload | null;
+  entityCount: number;
+};
+
+export type TransformHandleType = "move" | "rotate" | "scale-nw" | "scale-ne" | "scale-se" | "scale-sw";
+
+export type InputTransformHandleStartPayload = {
+  handleType: TransformHandleType;
+  x: number;
+  y: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputTransformHandleDragPayload = {
+  handleType: TransformHandleType;
+  x: number;
+  y: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputTransformHandleEndPayload = {
+  handleType: TransformHandleType;
+  timestamp: number;
+};
 
 export type NormalizedModifiers = {
   altKey: boolean;
@@ -74,14 +127,13 @@ export type InputViewportZoomPayload = {
   timestamp: number;
 };
 
-export type ViewportPanChangedPayload = {
-  offsetX: number;
-  offsetY: number;
-  scale: number;
-};
-
-export type ViewportZoomChangedPayload = {
-  scale: number;
+export type InputClickPayload = {
+  x: number;
+  y: number;
+  buttons: number;
+  pointerId: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
 };
 
 export type InputMouseDownPayload = {
@@ -113,15 +165,6 @@ export type InputMouseUpPayload = {
   timestamp: number;
 };
 
-export type InputDoubleClickPayload = {
-  x: number;
-  y: number;
-  buttons: number;
-  pointerId: number;
-  modifiers: NormalizedModifiers;
-  timestamp: number;
-};
-
 export type InputWheelPayload = {
   x: number;
   y: number;
@@ -139,61 +182,122 @@ export type InputContextMenuPayload = {
   timestamp: number;
 };
 
-export type InputKeyPayload = {
+export type InputDoubleClickPayload = {
+  x: number;
+  y: number;
+  buttons: number;
+  pointerId: number;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
+};
+
+export type InputKeyDownPayload = {
   key: string;
   code: string;
   modifiers: NormalizedModifiers;
   timestamp: number;
 };
 
-export type CanvasReadyPayload = {
-  canvas: HTMLCanvasElement;
+export type InputKeyUpPayload = {
+  key: string;
+  code: string;
+  modifiers: NormalizedModifiers;
+  timestamp: number;
 };
 
-export type CanvasResizedPayload = {
+export type InputCanvasResizedPayload = {
   width: number;
   height: number;
   dpr: number;
 };
 
+export type ViewportZoomChangedPayload = {
+  scale: number;
+};
+
+export type ViewportPanChangedPayload = {
+  offsetX: number;
+  offsetY: number;
+  scale: number;
+};
+
+export type GraphicsRenderUpdatedPayload = {
+  commands: unknown[]; // Type cycle avoidance, actual type is DrawCommand[]
+  dirtyRects: RectPayload[];
+  viewTransform: { a: number; b: number; c: number; d: number; e: number; f: number };
+};
+
+type TopicsConst = typeof import("./topics.js").Topics;
+
+export type TopicPayloadMap = {
+  [K in TopicsConst["UI_COMMAND"]]: UICommandPayload;
+} & {
+  [K in TopicsConst["UI_TOOL_CHANGED"]]: UIToolChangedPayload;
+} & {
+  [K in TopicsConst["UI_OBJECT_PROPERTIES_CHANGED"]]: UIObjectPropertiesChangedPayload;
+} & {
+  [K in TopicsConst["DIALOG_REQUEST"]]: DialogRequestPayload;
+} & {
+  [K in TopicsConst["VIEWPORT_PAN_CHANGED"]]: ViewportPanChangedPayload;
+} & {
+  [K in TopicsConst["VIEWPORT_ZOOM_CHANGED"]]: ViewportZoomChangedPayload;
+} & {
+  [K in TopicsConst["GRAPHICS_SELECTION_CHANGED"]]: GraphicsSelectionPayload;
+} & {
+  [K in TopicsConst["GRAPHICS_SELECTION_SET_CHANGED"]]: GraphicsSelectionSetPayload;
+} & {
+  [K in TopicsConst["GRAPHICS_ENTITY_UPDATED"]]: GraphicsEntityUpdatedPayload;
+} & {
+  [K in TopicsConst["GRAPHICS_RENDER_UPDATED"]]: GraphicsRenderUpdatedPayload;
+} & {
+  [K in TopicsConst["INPUT_BOX_SELECTION_START"]]: InputBoxSelectionStartPayload;
+} & {
+  [K in TopicsConst["INPUT_BOX_SELECTION_CHANGE"]]: InputBoxSelectionChangePayload;
+} & {
+  [K in TopicsConst["INPUT_BOX_SELECTION_END"]]: InputBoxSelectionEndPayload;
+} & {
+  [K in TopicsConst["INPUT_VIEWPORT_PAN_START"]]: InputViewportPanStartPayload;
+} & {
+  [K in TopicsConst["INPUT_VIEWPORT_PAN_MOVE"]]: InputViewportPanMovePayload;
+} & {
+  [K in TopicsConst["INPUT_VIEWPORT_PAN_END"]]: InputViewportPanEndPayload;
+} & {
+  [K in TopicsConst["INPUT_VIEWPORT_ZOOM"]]: InputViewportZoomPayload;
+} & {
+  [K in TopicsConst["INPUT_TRANSFORM_HANDLE_START"]]: InputTransformHandleStartPayload;
+} & {
+  [K in TopicsConst["INPUT_TRANSFORM_HANDLE_DRAG"]]: InputTransformHandleDragPayload;
+} & {
+  [K in TopicsConst["INPUT_TRANSFORM_HANDLE_END"]]: InputTransformHandleEndPayload;
+} & {
+  [K in TopicsConst["INPUT_MOUSE_DOWN"]]: InputMouseDownPayload;
+} & {
+  [K in TopicsConst["INPUT_MOUSE_MOVE"]]: InputMouseMovePayload;
+} & {
+  [K in TopicsConst["INPUT_MOUSE_UP"]]: InputMouseUpPayload;
+} & {
+  [K in TopicsConst["INPUT_DOUBLE_CLICK"]]: InputDoubleClickPayload;
+} & {
+  [K in TopicsConst["INPUT_WHEEL"]]: InputWheelPayload;
+} & {
+  [K in TopicsConst["INPUT_CONTEXT_MENU"]]: InputContextMenuPayload;
+} & {
+  [K in TopicsConst["INPUT_KEY_DOWN"]]: InputKeyDownPayload;
+} & {
+  [K in TopicsConst["INPUT_KEY_UP"]]: InputKeyUpPayload;
+} & {
+  [K in TopicsConst["INPUT_CANVAS_READY"]]: void;
+} & {
+  [K in TopicsConst["INPUT_CANVAS_RESIZED"]]: InputCanvasResizedPayload;
+} & {
+  [K in TopicsConst["LOG_EVENT"]]: { topic: string; payload: unknown };
+} & {
+  [K in TopicsConst["RENDER_STATS"]]: unknown;
+};
+
+export type KnownTopic = keyof TopicPayloadMap;
+
 export type LogEventPayload = {
   topic: string;
   payload: unknown;
 };
-
-export type TopicPayloadMap = {
-  "UI.COMMAND": UICommandPayload;
-  "UI.TOOL_CHANGED": UIToolChangedPayload;
-  "UI.OBJECT_PROPERTIES_CHANGED": UIObjectPropertiesChangedPayload;
-
-  "VIEWPORT.PAN_CHANGED": ViewportPanChangedPayload;
-  "VIEWPORT.ZOOM_CHANGED": ViewportZoomChangedPayload;
-
-  "GRAPHICS.SELECTION_CHANGED": GraphicsSelectionPayload;
-  "GRAPHICS.RENDER_UPDATED": unknown;
-
-  "INPUT.BOX_SELECTION_START": InputBoxSelectionStartPayload;
-  "INPUT.BOX_SELECTION_CHANGE": InputBoxSelectionChangePayload;
-  "INPUT.BOX_SELECTION_END": InputBoxSelectionEndPayload;
-
-  "INPUT.VIEWPORT_PAN_START": InputViewportPanStartPayload;
-  "INPUT.VIEWPORT_PAN_MOVE": InputViewportPanMovePayload;
-  "INPUT.VIEWPORT_PAN_END": InputViewportPanEndPayload;
-  "INPUT.VIEWPORT_ZOOM": InputViewportZoomPayload;
-
-  "INPUT.MOUSE_DOWN": InputMouseDownPayload;
-  "INPUT.MOUSE_MOVE": InputMouseMovePayload;
-  "INPUT.MOUSE_UP": InputMouseUpPayload;
-  "INPUT.DOUBLE_CLICK": InputDoubleClickPayload;
-  "INPUT.WHEEL": InputWheelPayload;
-  "INPUT.CONTEXT_MENU": InputContextMenuPayload;
-  "INPUT.KEY_DOWN": InputKeyPayload;
-  "INPUT.KEY_UP": InputKeyPayload;
-  "INPUT.CANVAS_READY": CanvasReadyPayload;
-  "INPUT.CANVAS_RESIZED": CanvasResizedPayload;
-
-  "LOG.EVENT": LogEventPayload;
-  "RENDER.STATS": unknown;
-};
-
-export type KnownTopic = keyof TopicPayloadMap;

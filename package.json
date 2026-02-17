@@ -1,0 +1,18 @@
+{
+  "name": "render-root",
+  "private": true,
+  "packageManager": "npm@10.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3"
+  }
+}

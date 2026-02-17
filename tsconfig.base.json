@@ -19,14 +19,12 @@
     "baseUrl": ".",
     "paths": {
       "@render/event-bus": ["packages/event-bus/src/index.ts"],
-      "@render/geometry": ["packages/geometry/src/index.ts"],
       "@render/ui-shell": ["packages/ui-shell/src/index.ts"],
       "@render/graphics-kernel": ["packages/graphics-kernel/src/index.ts"],
       "@render/rendering-core": ["packages/rendering-core/src/index.ts"],
       "@render/renderer-canvas2d": ["packages/renderer-canvas2d/src/index.ts"],
       "@render/integration-graphics": ["packages/integration-graphics/src/index.ts"],
-      "@render/integration-rendering": ["packages/integration-rendering/src/index.ts"],
-      "@render/utils": ["packages/utils/src/index.ts"]
+      "@render/integration-rendering": ["packages/integration-rendering/src/index.ts"]
     },
     "types": []
   }

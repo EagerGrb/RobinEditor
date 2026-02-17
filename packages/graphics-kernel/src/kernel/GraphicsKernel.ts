@@ -6,18 +6,12 @@ import { applyTransformToPoint, identityTransform, invertTransform } from "../ma
 import type { SceneModel, EntityModel } from "../model/models.js";
 import { SceneManager, type SceneChangeSet } from "../scene/SceneManager.js";
 import { createId } from "../scene/id.js";
-import { ToolManager } from "./tools/ToolManager.js";
 import type { InputKeyEvent, InputPointerEvent, SelectionState, SnapOptions, SnapResult, ToolContext, ToolType } from "../tools/Tool.js";
-import type {
-  GraphicsKernelEvent,
-  GraphicsKernelEventHandler,
-  IGraphicsKernel,
-  SelectionTransform,
-  SetToolParams
-} from "./IGraphicsKernel.js";
-import { snapToGrid } from "../geometry/snap.js";
+import { IntersectionRunner } from "./debug/IntersectionRunner.js";
+import type { GraphicsKernelEvent, GraphicsKernelEventHandler, IGraphicsKernel, SelectionTransform, SetToolParams } from "./IGraphicsKernel.js";
 import type { ICommand } from "../history/ICommand.js";
 import { HistoryManager } from "../history/HistoryManager.js";
+import { ToolManager } from "./tools/ToolManager.js";
 
 class SnapshotSceneCommand implements ICommand {
   readonly id: string;
@@ -44,6 +38,7 @@ class SnapshotSceneCommand implements ICommand {
 
 export class GraphicsKernel implements IGraphicsKernel {
   private handlers = new Set<GraphicsKernelEventHandler>();
+  private toolManager = new ToolManager();
 
   private historyReplaying = false;
   private history = new HistoryManager({ maxStackSize: 100 });
@@ -67,12 +62,14 @@ export class GraphicsKernel implements IGraphicsKernel {
     pointerId: number | null;
     startedGesture: boolean;
     pivot: Point | null;
+    baseline: SceneModel | null;
     entities: Map<string, EntityModel>;
   } = {
     active: false,
     pointerId: null,
     startedGesture: false,
     pivot: null,
+    baseline: null,
     entities: new Map()
   };
 
@@ -82,8 +79,6 @@ export class GraphicsKernel implements IGraphicsKernel {
   private worldToScreen: Transform2D = identityTransform();
   private screenToWorld: Transform2D = identityTransform();
   private viewportSize: { width: number; height: number } = { width: 1, height: 1 };
-
-  private toolManager = new ToolManager();
 
   private selection: {
     selectedIds: Set<string>;
@@ -99,6 +94,10 @@ export class GraphicsKernel implements IGraphicsKernel {
   private ephemeral: DrawCommand[] = [];
   private drawCommands: DrawCommand[] = [];
 
+  constructor() {
+    this.toolManager.activeTool.onEnter(this.toolContext());
+  }
+
   on(handler: GraphicsKernelEventHandler): () => void {
     this.handlers.add(handler);
     return () => {
@@ -113,7 +112,9 @@ export class GraphicsKernel implements IGraphicsKernel {
     this.selection.selectedIds.clear();
     this.selection.hoverId = null;
     this.selection.marqueeRect = null;
+    this.ghostEntity = null;
     this.ephemeral = [];
+    this.toolManager.setTool("selection", this.toolContext());
     this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes });
     this.emitSelection();
     this.recomputeDrawCommands();
@@ -126,7 +127,9 @@ export class GraphicsKernel implements IGraphicsKernel {
     this.selection.selectedIds.clear();
     this.selection.hoverId = null;
     this.selection.marqueeRect = null;
+    this.ghostEntity = null;
     this.ephemeral = [];
+    this.toolManager.setTool("selection", this.toolContext());
     this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes });
     this.emitSelection();
     this.recomputeDrawCommands();
@@ -188,6 +191,7 @@ export class GraphicsKernel implements IGraphicsKernel {
   setTool(params: SetToolParams): void {
     this.toolManager.setTool(params.type, this.toolContext());
     this.ephemeral = [];
+    this.ghostEntity = null;
     this.recomputeDrawCommands();
   }
 
@@ -205,15 +209,10 @@ export class GraphicsKernel implements IGraphicsKernel {
     if (normalized.type === "pointerup") {
       this.endGestureForPointer(normalized.pointerId);
     }
-    
-    if (normalized.type === "pointerdown") {
-      this.toolManager.onPointerDown(normalized, this.toolContext());
-    } else if (normalized.type === "pointermove") {
-      this.toolManager.onPointerMove(normalized, this.toolContext());
-    } else if (normalized.type === "pointerup") {
-      this.toolManager.onPointerUp(normalized, this.toolContext());
-    }
-    
+    const ctx = this.toolContext();
+    if (normalized.type === "pointerdown") this.toolManager.onPointerDown(normalized, ctx);
+    if (normalized.type === "pointermove") this.toolManager.onPointerMove(normalized, ctx);
+    if (normalized.type === "pointerup") this.toolManager.onPointerUp(normalized, ctx);
     this.recomputeDrawCommands();
   }
 
@@ -235,7 +234,6 @@ export class GraphicsKernel implements IGraphicsKernel {
   }
 
   handleKeyUp(event: InputKeyEvent): void {
-    // ToolManager does not support onKeyUp currently
     this.recomputeDrawCommands();
   }
 
@@ -254,17 +252,7 @@ export class GraphicsKernel implements IGraphicsKernel {
       const entity = baseline.entities.find((e) => e.id === id);
       if (entity) {
         bounds = bounds ? rectUnion(bounds, entity.boundingBox) : entity.boundingBox;
-        nextEntities.set(id, {
-          ...(entity as any),
-          transform: { ...entity.transform },
-          boundingBox: { ...entity.boundingBox },
-          metadata: { ...(entity.metadata ?? {}) },
-          position: (entity as any).position ? { ...(entity as any).position } : undefined,
-          size: (entity as any).size ? { ...(entity as any).size } : undefined,
-          points: Array.isArray((entity as any).points)
-            ? (entity as any).points.map((p: any) => ({ x: p.x, y: p.y }))
-            : undefined
-        } as any);
+        nextEntities.set(id, deepCloneEntity(entity));
       }
     }
 
@@ -275,6 +263,7 @@ export class GraphicsKernel implements IGraphicsKernel {
       pointerId,
       startedGesture,
       pivot: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
+      baseline,
       entities: nextEntities
     };
   }
@@ -282,340 +271,20 @@ export class GraphicsKernel implements IGraphicsKernel {
   updateSelectionTransform(transform: SelectionTransform): void {
     if (!this.selectionTransform.active) return;
     if (this.selection.selectedIds.size === 0) return;
+    if (!this.selectionTransform.pivot) return;
+    if (!this.selectionTransform.baseline) return;
 
-    const baselineEntities = this.selectionTransform.entities;
-    if (baselineEntities.size === 0) return;
-
-    const pivot =
-      transform.type === "rotate" || transform.type === "scale"
-        ? transform.pivot ?? this.selectionTransform.pivot
-        : this.selectionTransform.pivot;
-    if (!pivot) return;
-
+    const pivot = transform.pivot ?? this.selectionTransform.pivot;
     const changesets: SceneChangeSet[] = [];
 
-    if (transform.type === "translate") {
-      const delta = transform.delta;
-      for (const id of this.selection.selectedIds) {
-        const base = baselineEntities.get(id);
-        if (!base) continue;
-
-        const patch: any = {};
-
-        if (base.type === "TRACK" && Array.isArray((base as any).points)) {
-          const points: Point[] = (base as any).points;
-          const nextPoints = points.map((p) => ({ x: p.x + delta.x, y: p.y + delta.y }));
-          const width = typeof (base as any).width === "number" ? (base as any).width : 1;
-          patch.points = nextPoints;
-          patch.transform = identityTransform();
-          patch.boundingBox = trackBounds(nextPoints, width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if (base.type === "ARC_TRACK" && (base as any).center && typeof (base as any).radius === "number") {
-          const c0 = (base as any).center as Point;
-          const nextCenter = { x: c0.x + delta.x, y: c0.y + delta.y };
-          const radius = (base as any).radius as number;
-          const startAngle = (base as any).startAngle as number;
-          const endAngle = (base as any).endAngle as number;
-          const clockwise = !!(base as any).clockwise;
-          const width = typeof (base as any).width === "number" ? (base as any).width : 1;
-          patch.center = nextCenter;
-          patch.transform = identityTransform();
-          patch.boundingBox = arcBounds(nextCenter, radius, startAngle, endAngle, clockwise, width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if (base.type === "BEZIER_TRACK" && (base as any).p0 && (base as any).p3) {
-          const p0 = (base as any).p0 as Point;
-          const p1 = (base as any).p1 as Point;
-          const p2 = (base as any).p2 as Point;
-          const p3 = (base as any).p3 as Point;
-          const next = {
-            p0: { x: p0.x + delta.x, y: p0.y + delta.y },
-            p1: { x: p1.x + delta.x, y: p1.y + delta.y },
-            p2: { x: p2.x + delta.x, y: p2.y + delta.y },
-            p3: { x: p3.x + delta.x, y: p3.y + delta.y }
-          };
-          const width = typeof (base as any).width === "number" ? (base as any).width : 1;
-          patch.p0 = next.p0;
-          patch.p1 = next.p1;
-          patch.p2 = next.p2;
-          patch.p3 = next.p3;
-          patch.transform = identityTransform();
-          patch.boundingBox = bezierBounds([next.p0, next.p1, next.p2, next.p3], width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if ((base as any).position) {
-          const pos = (base as any).position as Point;
-          const nextPos = { x: pos.x + delta.x, y: pos.y + delta.y };
-          patch.position = nextPos;
-
-          const rotDeg = typeof (base as any).rotation === "number" ? (base as any).rotation : 0;
-          const rad = (rotDeg * Math.PI) / 180;
-          const c = Math.cos(rad);
-          const s = Math.sin(rad);
-          patch.transform = { a: c, b: s, c: -s, d: c, e: nextPos.x, f: nextPos.y };
-
-          if (base.type === "PAD" && (base as any).size) {
-            const w = (base as any).size.w as number;
-            const h = (base as any).size.h as number;
-            const radius = Math.hypot(w / 2, h / 2);
-            patch.boundingBox = { x: nextPos.x - radius, y: nextPos.y - radius, width: radius * 2, height: radius * 2 };
-          } else if (base.type === "VIA" && typeof (base as any).diameter === "number") {
-            const r = (base as any).diameter / 2;
-            patch.boundingBox = { x: nextPos.x - r, y: nextPos.y - r, width: r * 2, height: r * 2 };
-          } else {
-            patch.boundingBox = {
-              x: nextPos.x - base.boundingBox.width / 2,
-              y: nextPos.y - base.boundingBox.height / 2,
-              width: base.boundingBox.width,
-              height: base.boundingBox.height
-            };
-          }
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        patch.transform = { ...base.transform, e: base.transform.e + delta.x, f: base.transform.f + delta.y };
-        patch.boundingBox = { ...base.boundingBox, x: base.boundingBox.x + delta.x, y: base.boundingBox.y + delta.y };
-        changesets.push(this.scene.updateEntity(id, patch));
-      }
-    } else if (transform.type === "rotate") {
-      const angle = transform.angleRad;
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const angleDeg = (angle * 180) / Math.PI;
-
-      for (const id of this.selection.selectedIds) {
-        const base = baselineEntities.get(id);
-        if (!base) continue;
-
-        const patch: any = {};
-
-        if (base.type === "TRACK" && Array.isArray((base as any).points)) {
-          const points: Point[] = (base as any).points;
-          const nextPoints = points.map((p) => ({
-            x: pivot.x + (p.x - pivot.x) * cos - (p.y - pivot.y) * sin,
-            y: pivot.y + (p.x - pivot.x) * sin + (p.y - pivot.y) * cos
-          }));
-          const width = typeof (base as any).width === "number" ? (base as any).width : 1;
-          patch.points = nextPoints;
-          patch.transform = identityTransform();
-          patch.boundingBox = trackBounds(nextPoints, width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if (base.type === "ARC_TRACK" && (base as any).center && typeof (base as any).radius === "number") {
-          const c0 = (base as any).center as Point;
-          const nextCenter = {
-            x: pivot.x + (c0.x - pivot.x) * cos - (c0.y - pivot.y) * sin,
-            y: pivot.y + (c0.x - pivot.x) * sin + (c0.y - pivot.y) * cos
-          };
-          const radius = (base as any).radius as number;
-          const startAngle = ((base as any).startAngle as number) + angle;
-          const endAngle = ((base as any).endAngle as number) + angle;
-          const clockwise = !!(base as any).clockwise;
-          const width = typeof (base as any).width === "number" ? (base as any).width : 1;
-          patch.center = nextCenter;
-          patch.startAngle = startAngle;
-          patch.endAngle = endAngle;
-          patch.transform = identityTransform();
-          patch.boundingBox = arcBounds(nextCenter, radius, startAngle, endAngle, clockwise, width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if (base.type === "BEZIER_TRACK" && (base as any).p0 && (base as any).p3) {
-          const rot = (p: Point) => ({
-            x: pivot.x + (p.x - pivot.x) * cos - (p.y - pivot.y) * sin,
-            y: pivot.y + (p.x - pivot.x) * sin + (p.y - pivot.y) * cos
-          });
-          const p0 = rot((base as any).p0 as Point);
-          const p1 = rot((base as any).p1 as Point);
-          const p2 = rot((base as any).p2 as Point);
-          const p3 = rot((base as any).p3 as Point);
-          const width = typeof (base as any).width === "number" ? (base as any).width : 1;
-          patch.p0 = p0;
-          patch.p1 = p1;
-          patch.p2 = p2;
-          patch.p3 = p3;
-          patch.transform = identityTransform();
-          patch.boundingBox = bezierBounds([p0, p1, p2, p3], width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if ((base as any).position) {
-          const pos = (base as any).position as Point;
-          const nextPos = {
-            x: pivot.x + (pos.x - pivot.x) * cos - (pos.y - pivot.y) * sin,
-            y: pivot.y + (pos.x - pivot.x) * sin + (pos.y - pivot.y) * cos
-          };
-          patch.position = nextPos;
-
-          if (typeof (base as any).rotation === "number") {
-            patch.rotation = ((base as any).rotation + angleDeg) % 360;
-          }
-
-          const rotDeg = typeof patch.rotation === "number" ? patch.rotation : 0;
-          const rad = (rotDeg * Math.PI) / 180;
-          const c = Math.cos(rad);
-          const s = Math.sin(rad);
-          patch.transform = { a: c, b: s, c: -s, d: c, e: nextPos.x, f: nextPos.y };
-
-          if (base.type === "PAD" && (base as any).size) {
-            const w = (base as any).size.w as number;
-            const h = (base as any).size.h as number;
-            const radius = Math.hypot(w / 2, h / 2);
-            patch.boundingBox = { x: nextPos.x - radius, y: nextPos.y - radius, width: radius * 2, height: radius * 2 };
-          } else if (base.type === "VIA" && typeof (base as any).diameter === "number") {
-            const r = (base as any).diameter / 2;
-            patch.boundingBox = { x: nextPos.x - r, y: nextPos.y - r, width: r * 2, height: r * 2 };
-          } else {
-            patch.boundingBox = {
-              x: nextPos.x - base.boundingBox.width / 2,
-              y: nextPos.y - base.boundingBox.height / 2,
-              width: base.boundingBox.width,
-              height: base.boundingBox.height
-            };
-          }
-
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        const center = { x: base.transform.e, y: base.transform.f };
-        const nextCenter = {
-          x: pivot.x + (center.x - pivot.x) * cos - (center.y - pivot.y) * sin,
-          y: pivot.y + (center.x - pivot.x) * sin + (center.y - pivot.y) * cos
-        };
-        patch.transform = { ...base.transform, e: nextCenter.x, f: nextCenter.y };
-        patch.boundingBox = {
-          x: nextCenter.x - base.boundingBox.width / 2,
-          y: nextCenter.y - base.boundingBox.height / 2,
-          width: base.boundingBox.width,
-          height: base.boundingBox.height
-        };
-        changesets.push(this.scene.updateEntity(id, patch));
-      }
-    } else if (transform.type === "scale") {
-      const sx = transform.scaleX;
-      const sy = transform.scaleY;
-      if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx === 0 || sy === 0) return;
-
-      for (const id of this.selection.selectedIds) {
-        const base = baselineEntities.get(id);
-        if (!base) continue;
-
-        const patch: any = {};
-
-        if (base.type === "TRACK" && Array.isArray((base as any).points)) {
-          const points: Point[] = (base as any).points;
-          const nextPoints = points.map((p) => ({
-            x: pivot.x + (p.x - pivot.x) * sx,
-            y: pivot.y + (p.y - pivot.y) * sy
-          }));
-          const width0 = typeof (base as any).width === "number" ? (base as any).width : 1;
-          const sAvg = (Math.abs(sx) + Math.abs(sy)) / 2;
-          const width = Math.max(0.001, width0 * sAvg);
-          patch.points = nextPoints;
-          patch.width = width;
-          patch.transform = identityTransform();
-          patch.boundingBox = trackBounds(nextPoints, width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if (base.type === "ARC_TRACK" && (base as any).center && typeof (base as any).radius === "number") {
-          const c0 = (base as any).center as Point;
-          const nextCenter = { x: pivot.x + (c0.x - pivot.x) * sx, y: pivot.y + (c0.y - pivot.y) * sy };
-          const sAvg = (Math.abs(sx) + Math.abs(sy)) / 2;
-          const radius = Math.max(0.001, ((base as any).radius as number) * sAvg);
-          const width0 = typeof (base as any).width === "number" ? (base as any).width : 1;
-          const width = Math.max(0.001, width0 * sAvg);
-          const startAngle = (base as any).startAngle as number;
-          const endAngle = (base as any).endAngle as number;
-          const clockwise = !!(base as any).clockwise;
-          patch.center = nextCenter;
-          patch.radius = radius;
-          patch.width = width;
-          patch.transform = identityTransform();
-          patch.boundingBox = arcBounds(nextCenter, radius, startAngle, endAngle, clockwise, width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if (base.type === "BEZIER_TRACK" && (base as any).p0 && (base as any).p3) {
-          const scalePoint = (p: Point) => ({ x: pivot.x + (p.x - pivot.x) * sx, y: pivot.y + (p.y - pivot.y) * sy });
-          const p0 = scalePoint((base as any).p0 as Point);
-          const p1 = scalePoint((base as any).p1 as Point);
-          const p2 = scalePoint((base as any).p2 as Point);
-          const p3 = scalePoint((base as any).p3 as Point);
-          const sAvg = (Math.abs(sx) + Math.abs(sy)) / 2;
-          const width0 = typeof (base as any).width === "number" ? (base as any).width : 1;
-          const width = Math.max(0.001, width0 * sAvg);
-          patch.p0 = p0;
-          patch.p1 = p1;
-          patch.p2 = p2;
-          patch.p3 = p3;
-          patch.width = width;
-          patch.transform = identityTransform();
-          patch.boundingBox = bezierBounds([p0, p1, p2, p3], width);
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-
-        if ((base as any).position) {
-          const pos = (base as any).position as Point;
-          const nextPos = { x: pivot.x + (pos.x - pivot.x) * sx, y: pivot.y + (pos.y - pivot.y) * sy };
-          patch.position = nextPos;
-
-          const rotDeg = typeof (base as any).rotation === "number" ? (base as any).rotation : 0;
-          const rad = (rotDeg * Math.PI) / 180;
-          const c = Math.cos(rad);
-          const s = Math.sin(rad);
-          patch.transform = { a: c, b: s, c: -s, d: c, e: nextPos.x, f: nextPos.y };
-
-          if (base.type === "PAD" && (base as any).size) {
-            const w0 = (base as any).size.w as number;
-            const h0 = (base as any).size.h as number;
-            const w = Math.max(0.001, Math.abs(w0 * sx));
-            const h = Math.max(0.001, Math.abs(h0 * sy));
-            patch.size = { w, h };
-            const radius = Math.hypot(w / 2, h / 2);
-            patch.boundingBox = { x: nextPos.x - radius, y: nextPos.y - radius, width: radius * 2, height: radius * 2 };
-          } else if (base.type === "VIA" && typeof (base as any).diameter === "number") {
-            const sAvg = (Math.abs(sx) + Math.abs(sy)) / 2;
-            const diameter = Math.max(0.001, (base as any).diameter * sAvg);
-            const drill = typeof (base as any).drill === "number" ? Math.max(0.001, (base as any).drill * sAvg) : undefined;
-            patch.diameter = diameter;
-            if (drill != null) patch.drill = drill;
-            const r = diameter / 2;
-            patch.boundingBox = { x: nextPos.x - r, y: nextPos.y - r, width: diameter, height: diameter };
-          } else {
-            patch.boundingBox = {
-              x: nextPos.x - base.boundingBox.width / 2,
-              y: nextPos.y - base.boundingBox.height / 2,
-              width: base.boundingBox.width,
-              height: base.boundingBox.height
-            };
-          }
-
-          changesets.push(this.scene.updateEntity(id, patch));
-          continue;
-        }
-      }
+    for (const [id, startEntity] of this.selectionTransform.entities) {
+      if (!this.selection.selectedIds.has(id)) continue;
+      const patch = patchEntityByTransform(startEntity, transform, pivot);
+      changesets.push(this.scene.updateEntity(id, patch));
     }
 
     const merged = mergeChangesets(changesets);
     if (merged.updated.length === 0 && merged.removed.length === 0 && merged.added.length === 0) return;
-
     this.recordSceneMutation();
     this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes: merged });
     this.recomputeDrawCommands();
@@ -629,6 +298,7 @@ export class GraphicsKernel implements IGraphicsKernel {
       pointerId: null,
       startedGesture: false,
       pivot: null,
+      baseline: null,
       entities: new Map()
     };
     if (shouldEndGesture) {
@@ -693,39 +363,35 @@ export class GraphicsKernel implements IGraphicsKernel {
     return bounds;
   }
 
-  setEphemeralDrawCommands(commands: DrawCommand[]): void {
-    this.ephemeral = commands;
-    this.recomputeDrawCommands();
-  }
-
-  setGhostEntity(entity: EntityModel | null): void {
-    this.ghostEntity = entity;
-    this.recomputeDrawCommands();
-  }
-
-  pasteEntities(templates: EntityModel[], options: { offset: Point; label?: string; select?: boolean }): string[] {
-    const offset = options.offset;
-    if (!offset || !Number.isFinite(offset.x) || !Number.isFinite(offset.y)) return [];
-    if (!Array.isArray(templates) || templates.length === 0) return [];
-
-    const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
-    const changesets: SceneChangeSet[] = [];
-    const newIds: string[] = [];
-
-    for (const t of templates) {
-      if (!t || typeof t.type !== "string") continue;
-      const next = cloneEntityTemplate(t);
-      next.id = createId(idPrefixForEntityType(next.type));
-      translateEntityInPlace(next as any, offset);
-      changesets.push(this.scene.addEntity(next));
-      newIds.push(next.id);
+  exportEntities(ids: string[]): EntityModel[] {
+    const out: EntityModel[] = [];
+    for (const id of ids) {
+      const entity = this.scene.getEntity(id);
+      if (!entity) continue;
+      out.push(deepCloneEntity(entity));
     }
+    return out;
+  }
 
-    if (newIds.length === 0) return [];
+  pasteEntities(entities: EntityModel[], options?: { offset?: Point; select?: boolean }): string[] {
+    if (!Array.isArray(entities) || entities.length === 0) return [];
+    const offset = options?.offset ?? { x: 10, y: 10 };
+    const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
 
-    if (options.select !== false) {
-      this.selection.selectedIds = new Set(newIds);
-      this.emitSelection();
+    const changesets: SceneChangeSet[] = [];
+    const pastedIds: string[] = [];
+
+    for (const e of entities) {
+      const clone = deepCloneEntity(e);
+      const nextId = createId("paste");
+      (clone as any).id = nextId;
+      pastedIds.push(nextId);
+
+      const patch = patchEntityByTransform(clone, { type: "translate", delta: offset }, { x: 0, y: 0 });
+      const placed: any = { ...clone, ...patch };
+      if (patch.boundingBox) placed.boundingBox = patch.boundingBox;
+
+      changesets.push(this.scene.addEntity(placed as EntityModel));
     }
 
     const merged = mergeChangesets(changesets);
@@ -733,15 +399,33 @@ export class GraphicsKernel implements IGraphicsKernel {
     if (merged.added.length || merged.updated.length || merged.removed.length) {
       this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes: merged });
     }
+
+    if (options?.select !== false) {
+      this.selection.selectedIds = new Set(pastedIds);
+      this.emitSelection();
+    }
+
     this.recomputeDrawCommands();
 
     if (baseline) {
       this.history.pushExecuted(
-        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), options.label ?? "Paste"),
+        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), "Paste"),
       );
     }
 
-    return newIds;
+    return pastedIds;
+  }
+
+  runIntersectionDebug(): void {
+    const selectedIds = Array.from(this.selection.selectedIds);
+    if (selectedIds.length < 2) {
+      console.warn("Select at least 2 entities to intersect");
+      return;
+    }
+    const entities = selectedIds.map(id => this.scene.getEntity(id)).filter((e): e is EntityModel => !!e);
+    const commands = IntersectionRunner.run(entities);
+    this.ephemeral = commands;
+    this.recomputeDrawCommands();
   }
 
   private emit(event: GraphicsKernelEvent): void {
@@ -759,13 +443,16 @@ export class GraphicsKernel implements IGraphicsKernel {
 
   private recomputeDrawCommands(): void {
     const viewportWorldRect = this.getViewportWorldRect();
+    const scene = this.scene.save();
+    if (this.ghostEntity) {
+      scene.entities = [...scene.entities, this.ghostEntity];
+    }
     this.drawCommands = this.viewGenerator.generate({
       grid: { visible: true, size: 50, subdivisions: 5 }, // Default grid
-      scene: this.scene.save(), // Pass scene model
+      scene, // include ghost entity for true preview rendering
       selection: this.selection,
       viewportWorldRect,
-      ephemeral: this.ephemeral,
-      ghostEntity: this.ghostEntity
+      ephemeral: this.ephemeral
     });
     this.emit({ type: "GRAPHICS.DRAW_COMMANDS_CHANGED", commands: this.drawCommands, viewTransform: this.worldToScreen });
   }
@@ -891,20 +578,30 @@ export class GraphicsKernel implements IGraphicsKernel {
       translateSelected: (delta: Point) => {
         this.translateSelected(delta);
       },
-      rotateSelected: (angleDegrees: number) => {
-        this.rotateSelected(angleDegrees);
+      rotateSelected: (angleDeg: number) => {
+        this.rotateSelected(angleDeg);
       },
       deleteSelection: () => {
         this.deleteSelection();
       },
       addEntity: (entity: EntityModel) => {
-        this.addEntity(entity);
+        const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
+        const changes = this.scene.addEntity(entity);
+        this.recordSceneMutation();
+        if (changes.added.length || changes.updated.length || changes.removed.length) {
+          this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes });
+        }
+        if (baseline) {
+          this.history.pushExecuted(
+            new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), "Add Entity"),
+          );
+        }
+      },
+      setGhostEntity: (entity: EntityModel | null) => {
+        this.ghostEntity = entity;
       },
       setEphemeralDrawCommands: (commands) => {
         this.ephemeral = commands;
-      },
-      setGhostEntity: (entity) => {
-        this.setGhostEntity(entity);
       }
     };
   }
@@ -1006,55 +703,37 @@ export class GraphicsKernel implements IGraphicsKernel {
       const entity = this.scene.getEntity(id);
       if (!entity) continue;
 
-      const patch: any = {};
+      const patch: Partial<EntityModel> & { metadata?: Record<string, unknown> } = {
+        boundingBox: { ...entity.boundingBox, x: entity.boundingBox.x + delta.x, y: entity.boundingBox.y + delta.y }
+      };
 
-      if ((entity as any).position && typeof (entity as any).position.x === "number" && typeof (entity as any).position.y === "number") {
-        patch.position = { x: (entity as any).position.x + delta.x, y: (entity as any).position.y + delta.y } as any;
-      }
-
-      if (entity.type === "TRACK" && Array.isArray((entity as any).points)) {
-        const points: Point[] = (entity as any).points;
-        const worldPoints = points.map((p) => applyTransformToPoint(entity.transform, p));
-        const nextPoints = worldPoints.map((p) => ({ x: p.x + delta.x, y: p.y + delta.y }));
-        const width = typeof (entity as any).width === "number" ? (entity as any).width : 1;
-        patch.points = nextPoints as any;
-        patch.transform = identityTransform();
-        patch.boundingBox = trackBounds(nextPoints, width) as any;
-      } else if (entity.type === "ARC_TRACK" && (entity as any).center && typeof (entity as any).radius === "number") {
-        const center = (entity as any).center as Point;
-        const nextCenter = { x: center.x + delta.x, y: center.y + delta.y };
-        const radius = (entity as any).radius as number;
-        const startAngle = (entity as any).startAngle as number;
-        const endAngle = (entity as any).endAngle as number;
-        const clockwise = !!(entity as any).clockwise;
-        const width = typeof (entity as any).width === "number" ? (entity as any).width : 1;
-        patch.center = nextCenter as any;
-        patch.transform = identityTransform();
-        patch.boundingBox = arcBounds(nextCenter, radius, startAngle, endAngle, clockwise, width) as any;
-      } else if (entity.type === "BEZIER_TRACK" && (entity as any).p0 && (entity as any).p3) {
-        const p0 = (entity as any).p0 as Point;
-        const p1 = (entity as any).p1 as Point;
-        const p2 = (entity as any).p2 as Point;
-        const p3 = (entity as any).p3 as Point;
-        const next = {
-          p0: { x: p0.x + delta.x, y: p0.y + delta.y },
-          p1: { x: p1.x + delta.x, y: p1.y + delta.y },
-          p2: { x: p2.x + delta.x, y: p2.y + delta.y },
-          p3: { x: p3.x + delta.x, y: p3.y + delta.y }
-        };
-        const width = typeof (entity as any).width === "number" ? (entity as any).width : 1;
-        patch.p0 = next.p0 as any;
-        patch.p1 = next.p1 as any;
-        patch.p2 = next.p2 as any;
-        patch.p3 = next.p3 as any;
-        patch.transform = identityTransform();
-        patch.boundingBox = bezierBounds([next.p0, next.p1, next.p2, next.p3], width) as any;
+      if (entity.type === "TRACK") {
+        const points = Array.isArray((entity as any).points) ? (entity as any).points : [];
+        patch["points" as never] = points.map((p: any) => ({ x: p.x + delta.x, y: p.y + delta.y })) as never;
+      } else if (entity.type === "ARC_TRACK") {
+        const center = (entity as any).center;
+        if (center) patch["center" as never] = { x: center.x + delta.x, y: center.y + delta.y } as never;
+      } else if (entity.type === "BEZIER_TRACK") {
+        const b: any = entity as any;
+        patch["p0" as never] = { x: b.p0.x + delta.x, y: b.p0.y + delta.y } as never;
+        patch["p1" as never] = { x: b.p1.x + delta.x, y: b.p1.y + delta.y } as never;
+        patch["p2" as never] = { x: b.p2.x + delta.x, y: b.p2.y + delta.y } as never;
+        patch["p3" as never] = { x: b.p3.x + delta.x, y: b.p3.y + delta.y } as never;
+      } else if (entity.type === "PAD") {
+        const pos = (entity as any).position;
+        if (pos) patch["position" as never] = { x: pos.x + delta.x, y: pos.y + delta.y } as never;
+        patch.transform = { ...entity.transform, e: entity.transform.e + delta.x, f: entity.transform.f + delta.y };
+      } else if (entity.type === "VIA") {
+        const pos = (entity as any).position;
+        if (pos) patch["position" as never] = { x: pos.x + delta.x, y: pos.y + delta.y } as never;
+        patch.transform = { ...entity.transform, e: entity.transform.e + delta.x, f: entity.transform.f + delta.y };
       } else {
         patch.transform = { ...entity.transform, e: entity.transform.e + delta.x, f: entity.transform.f + delta.y };
-        patch.boundingBox = { ...entity.boundingBox, x: entity.boundingBox.x + delta.x, y: entity.boundingBox.y + delta.y };
       }
 
-      changesets.push(this.scene.updateEntity(id, patch));
+      changesets.push(
+        this.scene.updateEntity(id, patch),
+      );
     }
 
     const merged = mergeChangesets(changesets);
@@ -1071,127 +750,27 @@ export class GraphicsKernel implements IGraphicsKernel {
     }
   }
 
-  private rotateSelected(angleDegrees: number): void {
-    if (angleDegrees === 0) return;
+  private rotateSelected(_angleDeg: number): void {
+    if (!Number.isFinite(_angleDeg) || _angleDeg === 0) return;
     if (this.selection.selectedIds.size === 0) return;
 
     const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
-    const changesets: SceneChangeSet[] = [];
 
     const bounds = this.getSelectionBounds();
     if (!bounds) return;
+    const pivot = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+    const angleRad = (_angleDeg * Math.PI) / 180;
 
-    const cx = bounds.x + bounds.width / 2;
-    const cy = bounds.y + bounds.height / 2;
-    const rad = (angleDegrees * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-
+    const changesets: SceneChangeSet[] = [];
     for (const id of this.selection.selectedIds) {
       const entity = this.scene.getEntity(id);
       if (!entity) continue;
-
-      const patch: any = {};
-
-      if (entity.type === "TRACK" && Array.isArray((entity as any).points)) {
-        const points: Point[] = (entity as any).points;
-        const worldPoints = points.map((p) => applyTransformToPoint(entity.transform, p));
-        const nextPoints = worldPoints.map((p) => ({
-          x: cx + (p.x - cx) * cos - (p.y - cy) * sin,
-          y: cy + (p.x - cx) * sin + (p.y - cy) * cos
-        }));
-        const width = typeof (entity as any).width === "number" ? (entity as any).width : 1;
-        patch.points = nextPoints as any;
-        patch.transform = identityTransform();
-        patch.boundingBox = trackBounds(nextPoints, width) as any;
-        changesets.push(this.scene.updateEntity(id, patch));
-        continue;
-      }
-
-      if (entity.type === "ARC_TRACK" && (entity as any).center && typeof (entity as any).radius === "number") {
-        const center = (entity as any).center as Point;
-        const nextCenter = {
-          x: cx + (center.x - cx) * cos - (center.y - cy) * sin,
-          y: cy + (center.x - cx) * sin + (center.y - cy) * cos
-        };
-        const radius = (entity as any).radius as number;
-        const startAngle = ((entity as any).startAngle as number) + rad;
-        const endAngle = ((entity as any).endAngle as number) + rad;
-        const clockwise = !!(entity as any).clockwise;
-        const width = typeof (entity as any).width === "number" ? (entity as any).width : 1;
-        patch.center = nextCenter as any;
-        patch.startAngle = startAngle as any;
-        patch.endAngle = endAngle as any;
-        patch.transform = identityTransform();
-        patch.boundingBox = arcBounds(nextCenter, radius, startAngle, endAngle, clockwise, width) as any;
-        changesets.push(this.scene.updateEntity(id, patch));
-        continue;
-      }
-
-      if (entity.type === "BEZIER_TRACK" && (entity as any).p0 && (entity as any).p3) {
-        const rotPoint = (p: Point) => ({
-          x: cx + (p.x - cx) * cos - (p.y - cy) * sin,
-          y: cy + (p.x - cx) * sin + (p.y - cy) * cos
-        });
-        const p0 = rotPoint((entity as any).p0 as Point);
-        const p1 = rotPoint((entity as any).p1 as Point);
-        const p2 = rotPoint((entity as any).p2 as Point);
-        const p3 = rotPoint((entity as any).p3 as Point);
-        const width = typeof (entity as any).width === "number" ? (entity as any).width : 1;
-        patch.p0 = p0 as any;
-        patch.p1 = p1 as any;
-        patch.p2 = p2 as any;
-        patch.p3 = p3 as any;
-        patch.transform = identityTransform();
-        patch.boundingBox = bezierBounds([p0, p1, p2, p3], width) as any;
-        changesets.push(this.scene.updateEntity(id, patch));
-        continue;
-      }
-
-      const center = applyTransformToPoint(entity.transform, { x: 0, y: 0 });
-      const nextCenter = {
-        x: cx + (center.x - cx) * cos - (center.y - cy) * sin,
-        y: cy + (center.x - cx) * sin + (center.y - cy) * cos
-      };
-
-      const prevRot = typeof (entity as any).rotation === "number" ? (entity as any).rotation : 0;
-      const nextRot = (prevRot + angleDegrees) % 360;
-
-      if ((entity as any).position && typeof (entity as any).position.x === "number" && typeof (entity as any).position.y === "number") {
-        patch.position = nextCenter as any;
-      }
-      if (typeof (entity as any).rotation === "number" && (entity.type === "PAD" || entity.type === "FOOTPRINT" || entity.type === "TEXT")) {
-        patch.rotation = nextRot as any;
-      }
-
-      const useRot = entity.type === "PAD" || entity.type === "FOOTPRINT" || entity.type === "TEXT" ? nextRot : 0;
-      const rRad = (useRot * Math.PI) / 180;
-      const rc = Math.cos(rRad);
-      const rs = Math.sin(rRad);
-      patch.transform = { a: rc, b: rs, c: -rs, d: rc, e: nextCenter.x, f: nextCenter.y };
-
-      if (entity.type === "PAD" && (entity as any).size) {
-        const w = typeof (entity as any).size.w === "number" ? (entity as any).size.w : entity.boundingBox.width;
-        const h = typeof (entity as any).size.h === "number" ? (entity as any).size.h : entity.boundingBox.height;
-        const radius = Math.hypot(w / 2, h / 2);
-        patch.boundingBox = { x: nextCenter.x - radius, y: nextCenter.y - radius, width: radius * 2, height: radius * 2 };
-      } else if (entity.type === "VIA" && typeof (entity as any).diameter === "number") {
-        const r = (entity as any).diameter / 2;
-        patch.boundingBox = { x: nextCenter.x - r, y: nextCenter.y - r, width: r * 2, height: r * 2 };
-      } else {
-        patch.boundingBox = {
-          x: nextCenter.x - entity.boundingBox.width / 2,
-          y: nextCenter.y - entity.boundingBox.height / 2,
-          width: entity.boundingBox.width,
-          height: entity.boundingBox.height
-        };
-      }
-
+      const patch = patchEntityByTransform(entity, { type: "rotate", angleRad, pivot }, pivot);
       changesets.push(this.scene.updateEntity(id, patch));
     }
 
     const merged = mergeChangesets(changesets);
-    if (merged.updated.length === 0) return;
+    if (merged.updated.length === 0 && merged.removed.length === 0 && merged.added.length === 0) return;
 
     this.recordSceneMutation();
     this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes: merged });
@@ -1228,23 +807,6 @@ export class GraphicsKernel implements IGraphicsKernel {
       );
     }
   }
-
-  private addEntity(entity: EntityModel): void {
-    const baseline = !this.historyReplaying && !this.gesture.active ? this.scene.save() : null;
-    const changeset = this.scene.addEntity(entity);
-
-    this.recordSceneMutation();
-    if (changeset.added.length > 0) {
-      this.emit({ type: "GRAPHICS.SCENE_CHANGED", changes: changeset });
-    }
-    this.recomputeDrawCommands();
-
-    if (baseline) {
-      this.history.pushExecuted(
-        new SnapshotSceneCommand((scene) => this.applySnapshot(scene), baseline, this.scene.save(), "Add Entity"),
-      );
-    }
-  }
 }
 
 function mergeChangesets(changesets: SceneChangeSet[]): SceneChangeSet {
@@ -1277,56 +839,234 @@ function clampNumber(v: number, min: number, max: number): number {
   return Math.min(Math.max(v, min), max);
 }
 
-function cloneEntityTemplate(entity: EntityModel): EntityModel {
-  return JSON.parse(JSON.stringify(entity)) as EntityModel;
-}
-
-function idPrefixForEntityType(type: string): string {
-  if (type === "TRACK") return "track";
-  if (type === "ARC_TRACK") return "arcTrack";
-  if (type === "BEZIER_TRACK") return "bezierTrack";
-  if (type === "PAD") return "pad";
-  if (type === "VIA") return "via";
-  if (type === "FOOTPRINT") return "footprint";
-  if (type === "TEXT") return "text";
-  return "entity";
-}
-
-function translateEntityInPlace(entity: any, delta: Point): void {
-  const shiftPoint = (p: any) => {
-    if (!p || typeof p.x !== "number" || typeof p.y !== "number") return;
-    p.x += delta.x;
-    p.y += delta.y;
+function snapToGrid(p: Point, gridSize: number): Point {
+  if (!Number.isFinite(gridSize) || gridSize <= 0) return p;
+  return {
+    x: Math.round(p.x / gridSize) * gridSize,
+    y: Math.round(p.y / gridSize) * gridSize
   };
-
-  if (entity.position) shiftPoint(entity.position);
-  if (entity.center) shiftPoint(entity.center);
-  if (entity.p0) shiftPoint(entity.p0);
-  if (entity.p1) shiftPoint(entity.p1);
-  if (entity.p2) shiftPoint(entity.p2);
-  if (entity.p3) shiftPoint(entity.p3);
-
-  if (Array.isArray(entity.points)) {
-    for (const p of entity.points) shiftPoint(p);
-  }
-
-  if (entity.boundingBox && typeof entity.boundingBox.x === "number" && typeof entity.boundingBox.y === "number") {
-    entity.boundingBox.x += delta.x;
-    entity.boundingBox.y += delta.y;
-  }
-
-  if (entity.transform && typeof entity.transform.e === "number" && typeof entity.transform.f === "number") {
-    entity.transform.e += delta.x;
-    entity.transform.f += delta.y;
-  }
 }
 
-function trackBounds(points: Point[], width: number): Rect {
-  if (points.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
+function deepCloneEntity<T extends EntityModel>(e: T): T {
+  const clone: any = {
+    ...e,
+    transform: { ...e.transform },
+    boundingBox: { ...e.boundingBox },
+    metadata: { ...(e.metadata ?? {}) }
+  };
+  if (Array.isArray((e as any).points)) clone.points = (e as any).points.map((p: any) => ({ x: p.x, y: p.y }));
+  if ((e as any).center) clone.center = { x: (e as any).center.x, y: (e as any).center.y };
+  if ((e as any).position) clone.position = { x: (e as any).position.x, y: (e as any).position.y };
+  if ((e as any).p0) clone.p0 = { x: (e as any).p0.x, y: (e as any).p0.y };
+  if ((e as any).p1) clone.p1 = { x: (e as any).p1.x, y: (e as any).p1.y };
+  if ((e as any).p2) clone.p2 = { x: (e as any).p2.x, y: (e as any).p2.y };
+  if ((e as any).p3) clone.p3 = { x: (e as any).p3.x, y: (e as any).p3.y };
+  if ((e as any).size) clone.size = { w: (e as any).size.w, h: (e as any).size.h };
+  if ((e as any).drill) clone.drill = { ...(e as any).drill, offset: (e as any).drill.offset ? { ...(e as any).drill.offset } : undefined };
+  if (Array.isArray((e as any).layers)) clone.layers = [...(e as any).layers];
+  return clone as T;
+}
+
+function patchEntityByTransform(entity: EntityModel, transform: SelectionTransform, pivot: Point): Partial<EntityModel> & Record<string, unknown> {
+  if (transform.type === "translate") {
+    const d = transform.delta;
+    const dx = d.x;
+    const dy = d.y;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return {};
+    const out: any = {
+      boundingBox: { ...entity.boundingBox, x: entity.boundingBox.x + dx, y: entity.boundingBox.y + dy }
+    };
+
+    if (entity.type === "TRACK") {
+      const points = Array.isArray((entity as any).points) ? (entity as any).points : [];
+      out.points = points.map((p: any) => ({ x: p.x + dx, y: p.y + dy }));
+      out.boundingBox = boundsFromPolyline(out.points, (entity as any).width ?? 0);
+      return out;
+    }
+
+    if (entity.type === "ARC_TRACK") {
+      const c = (entity as any).center;
+      if (c) out.center = { x: c.x + dx, y: c.y + dy };
+      const r = Number((entity as any).radius) || 0;
+      const w = Number((entity as any).width) || 0;
+      out.boundingBox = boundsFromArc(out.center ?? c, r, (entity as any).startAngle ?? 0, (entity as any).endAngle ?? 0, (entity as any).clockwise === true, w);
+      return out;
+    }
+
+    if (entity.type === "BEZIER_TRACK") {
+      const b: any = entity as any;
+      out.p0 = { x: b.p0.x + dx, y: b.p0.y + dy };
+      out.p1 = { x: b.p1.x + dx, y: b.p1.y + dy };
+      out.p2 = { x: b.p2.x + dx, y: b.p2.y + dy };
+      out.p3 = { x: b.p3.x + dx, y: b.p3.y + dy };
+      out.boundingBox = boundsFromPoints([out.p0, out.p1, out.p2, out.p3], (entity as any).width ?? 0);
+      return out;
+    }
+
+    if (entity.type === "PAD") {
+      const pos = (entity as any).position;
+      if (pos) out.position = { x: pos.x + dx, y: pos.y + dy };
+      out.transform = { ...entity.transform, e: entity.transform.e + dx, f: entity.transform.f + dy };
+      out.boundingBox = boundsFromPad(out.position ?? pos, (entity as any).size, 0);
+      return out;
+    }
+
+    if (entity.type === "VIA") {
+      const pos = (entity as any).position;
+      if (pos) out.position = { x: pos.x + dx, y: pos.y + dy };
+      out.transform = { ...entity.transform, e: entity.transform.e + dx, f: entity.transform.f + dy };
+      out.boundingBox = boundsFromCircle(out.position ?? pos, Number((entity as any).diameter) / 2 || 0, 0);
+      return out;
+    }
+
+    out.transform = { ...entity.transform, e: entity.transform.e + dx, f: entity.transform.f + dy };
+    return out;
+  }
+
+  if (transform.type === "rotate") {
+    const angleRad = transform.angleRad;
+    if (!Number.isFinite(angleRad) || angleRad === 0) return {};
+    const out: any = {};
+
+    if (entity.type === "TRACK") {
+      const points = Array.isArray((entity as any).points) ? (entity as any).points : [];
+      out.points = points.map((p: any) => rotatePoint({ x: p.x, y: p.y }, pivot, angleRad));
+      out.boundingBox = boundsFromPolyline(out.points, (entity as any).width ?? 0);
+      return out;
+    }
+
+    if (entity.type === "ARC_TRACK") {
+      const c = (entity as any).center;
+      if (c) out.center = rotatePoint({ x: c.x, y: c.y }, pivot, angleRad);
+      out.startAngle = ((entity as any).startAngle ?? 0) + angleRad;
+      out.endAngle = ((entity as any).endAngle ?? 0) + angleRad;
+      const r = Number((entity as any).radius) || 0;
+      const w = Number((entity as any).width) || 0;
+      out.boundingBox = boundsFromArc(out.center ?? c, r, out.startAngle, out.endAngle, (entity as any).clockwise === true, w);
+      return out;
+    }
+
+    if (entity.type === "BEZIER_TRACK") {
+      const b: any = entity as any;
+      out.p0 = rotatePoint(b.p0, pivot, angleRad);
+      out.p1 = rotatePoint(b.p1, pivot, angleRad);
+      out.p2 = rotatePoint(b.p2, pivot, angleRad);
+      out.p3 = rotatePoint(b.p3, pivot, angleRad);
+      out.boundingBox = boundsFromPoints([out.p0, out.p1, out.p2, out.p3], (entity as any).width ?? 0);
+      return out;
+    }
+
+    if (entity.type === "PAD") {
+      const pos = (entity as any).position;
+      const nextPos = pos ? rotatePoint(pos, pivot, angleRad) : null;
+      if (nextPos) out.position = nextPos;
+      const rotation = Number((entity as any).rotation) || 0;
+      out.rotation = rotation + (angleRad * 180) / Math.PI;
+      if (nextPos) out.transform = transformFromPosAndRot(nextPos, out.rotation);
+      out.boundingBox = boundsFromPad(nextPos ?? pos, (entity as any).size, out.rotation);
+      return out;
+    }
+
+    if (entity.type === "VIA") {
+      const pos = (entity as any).position;
+      const nextPos = pos ? rotatePoint(pos, pivot, angleRad) : null;
+      if (nextPos) out.position = nextPos;
+      if (nextPos) out.transform = transformFromPosAndRot(nextPos, 0);
+      out.boundingBox = boundsFromCircle(nextPos ?? pos, Number((entity as any).diameter) / 2 || 0, 0);
+      return out;
+    }
+
+    return out;
+  }
+
+  const sx = transform.scaleX;
+  const sy = transform.scaleY;
+  if (!Number.isFinite(sx) || !Number.isFinite(sy) || sx === 0 || sy === 0) return {};
+  const out: any = {};
+
+  if (entity.type === "TRACK") {
+    const points = Array.isArray((entity as any).points) ? (entity as any).points : [];
+    out.points = points.map((p: any) => scalePoint({ x: p.x, y: p.y }, pivot, sx, sy));
+    out.boundingBox = boundsFromPolyline(out.points, (entity as any).width ?? 0);
+    return out;
+  }
+
+  if (entity.type === "ARC_TRACK") {
+    const c = (entity as any).center;
+    if (c) out.center = scalePoint({ x: c.x, y: c.y }, pivot, sx, sy);
+    const r = Number((entity as any).radius) || 0;
+    const w = Number((entity as any).width) || 0;
+    const s = (Math.abs(sx) + Math.abs(sy)) / 2;
+    out.radius = r * s;
+    out.boundingBox = boundsFromArc(out.center ?? c, out.radius, (entity as any).startAngle ?? 0, (entity as any).endAngle ?? 0, (entity as any).clockwise === true, w);
+    return out;
+  }
+
+  if (entity.type === "BEZIER_TRACK") {
+    const b: any = entity as any;
+    out.p0 = scalePoint(b.p0, pivot, sx, sy);
+    out.p1 = scalePoint(b.p1, pivot, sx, sy);
+    out.p2 = scalePoint(b.p2, pivot, sx, sy);
+    out.p3 = scalePoint(b.p3, pivot, sx, sy);
+    out.boundingBox = boundsFromPoints([out.p0, out.p1, out.p2, out.p3], (entity as any).width ?? 0);
+    return out;
+  }
+
+  if (entity.type === "PAD") {
+    const pos = (entity as any).position;
+    const nextPos = pos ? scalePoint(pos, pivot, sx, sy) : null;
+    if (nextPos) out.position = nextPos;
+    const size = (entity as any).size;
+    if (size) {
+      const uniform = (Math.abs(sx) + Math.abs(sy)) / 2;
+      if ((entity as any).shape === "circle") {
+        out.size = { w: size.w * uniform, h: size.h * uniform };
+      } else {
+        out.size = { w: size.w * Math.abs(sx), h: size.h * Math.abs(sy) };
+      }
+    }
+    if ((entity as any).drill?.diameter) {
+      const uniform = (Math.abs(sx) + Math.abs(sy)) / 2;
+      out.drill = { ...(entity as any).drill, diameter: (entity as any).drill.diameter * uniform };
+    }
+    const rotation = Number((entity as any).rotation) || 0;
+    if (nextPos) out.transform = transformFromPosAndRot(nextPos, rotation);
+    out.boundingBox = boundsFromPad(nextPos ?? pos, out.size ?? size, rotation);
+    return out;
+  }
+
+  if (entity.type === "VIA") {
+    const pos = (entity as any).position;
+    const nextPos = pos ? scalePoint(pos, pivot, sx, sy) : null;
+    if (nextPos) out.position = nextPos;
+    const uniform = (Math.abs(sx) + Math.abs(sy)) / 2;
+    out.diameter = (Number((entity as any).diameter) || 0) * uniform;
+    out.drill = (Number((entity as any).drill) || 0) * uniform;
+    if (nextPos) out.transform = transformFromPosAndRot(nextPos, 0);
+    out.boundingBox = boundsFromCircle(nextPos ?? pos, out.diameter / 2 || 0, 0);
+    return out;
+  }
+
+  return out;
+}
+
+function rotatePoint(p: Point, pivot: Point, angleRad: number): Point {
+  const dx = p.x - pivot.x;
+  const dy = p.y - pivot.y;
+  const c = Math.cos(angleRad);
+  const s = Math.sin(angleRad);
+  return { x: pivot.x + dx * c - dy * s, y: pivot.y + dx * s + dy * c };
+}
+
+function scalePoint(p: Point, pivot: Point, sx: number, sy: number): Point {
+  return { x: pivot.x + (p.x - pivot.x) * sx, y: pivot.y + (p.y - pivot.y) * sy };
+}
+
+function boundsFromPoints(points: Point[], pad: number): Rect {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
   for (const p of points) {
     if (p.x < minX) minX = p.x;
     if (p.y < minY) minY = p.y;
@@ -1336,60 +1076,18 @@ function trackBounds(points: Point[], width: number): Rect {
   if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
     return { x: 0, y: 0, width: 0, height: 0 };
   }
-  const pad = Math.max(0, width / 2);
-  return { x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 };
+  const p2 = Math.max(0, pad) / 2;
+  return { x: minX - p2, y: minY - p2, width: maxX - minX + p2 * 2, height: maxY - minY + p2 * 2 };
 }
 
-function arcBounds(
-  center: Point,
-  radius: number,
-  startAngle: number,
-  endAngle: number,
-  clockwise: boolean,
-  width: number
-): Rect {
-  const r = Math.max(0, radius);
-  const pad = 0;
-  const points: Point[] = [];
-  const pushPoint = (angle: number) => {
-    points.push({ x: center.x + r * Math.cos(angle), y: center.y + r * Math.sin(angle) });
-  };
-  pushPoint(startAngle);
-  pushPoint(endAngle);
-  const angles = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
-  for (const a of angles) {
-    if (isAngleInArc(a, startAngle, endAngle, clockwise)) pushPoint(a);
-  }
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const p of points) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-  }
-  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
-    return { x: 0, y: 0, width: 0, height: 0 };
-  }
-  return { x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 };
+function boundsFromPolyline(points: Point[], width: number): Rect {
+  return boundsFromPoints(points, Math.max(0, width));
 }
 
-function isAngleInArc(angle: number, startAngle: number, endAngle: number, clockwise: boolean): boolean {
-  const ccw = clockwise;
-  const delta = angleDeltaSigned(startAngle, endAngle, ccw);
-  const diff = angleDeltaSigned(startAngle, angle, ccw);
-  const eps = 1e-12;
-  if (!Number.isFinite(delta) || Math.abs(delta) <= eps) return false;
-  if (delta > 0) return diff >= -eps && diff <= delta + eps;
-  return diff <= eps && diff >= delta - eps;
-}
-
-function isAngleBetweenCCW(angle: number, start: number, end: number): boolean {
-  if (start === end) return true;
-  if (start < end) return angle >= start && angle <= end;
-  return angle >= start || angle <= end;
+function boundsFromCircle(center: Point | undefined, radius: number, width: number): Rect {
+  if (!center) return { x: 0, y: 0, width: 0, height: 0 };
+  const r = Math.max(0, radius) + Math.max(0, width) / 2;
+  return { x: center.x - r, y: center.y - r, width: r * 2, height: r * 2 };
 }
 
 function angleDeltaSigned(from: number, to: number, ccw: boolean): number {
@@ -1406,25 +1104,49 @@ function angleDeltaSigned(from: number, to: number, ccw: boolean): number {
   return d;
 }
 
-function bezierBounds(points: Point[], width: number): Rect {
-  const p0 = points[0];
-  const p1 = points[1];
-  const p2 = points[2];
-  const p3 = points[3];
-  if (!p0 || !p1 || !p2 || !p3) return { x: 0, y: 0, width: 0, height: 0 };
+function boundsFromArc(
+  center: Point | undefined,
+  radius: number,
+  startAngle: number,
+  endAngle: number,
+  clockwise: boolean,
+  width: number
+): Rect {
+  if (!center) return { x: 0, y: 0, width: 0, height: 0 };
+  const r = Math.max(0, radius);
+  const pad = Math.max(0, width) / 2;
 
-  const ts = new Set<number>();
-  ts.add(0);
-  ts.add(1);
-  for (const t of cubicBezierExtremaTs(p0.x, p1.x, p2.x, p3.x)) ts.add(t);
-  for (const t of cubicBezierExtremaTs(p0.y, p1.y, p2.y, p3.y)) ts.add(t);
+  const pushPoint = (angle: number, out: Point[]) => {
+    out.push({ x: center.x + r * Math.cos(angle), y: center.y + r * Math.sin(angle) });
+  };
 
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const t of ts) {
-    const p = cubicBezierPoint(p0, p1, p2, p3, t);
+  const pts: Point[] = [];
+  const PI2 = Math.PI * 2;
+  const normalize = (v: number) => ((v % PI2) + PI2) % PI2;
+  const s = normalize(startAngle);
+  const e = normalize(endAngle);
+  const eps = 1e-12;
+  const sweep = clockwise
+    ? ((e - s) % PI2 + PI2) % PI2
+    : ((s - e) % PI2 + PI2) % PI2;
+  if (sweep <= eps) return boundsFromCircle(center, r, width);
+
+  pushPoint(startAngle, pts);
+  pushPoint(endAngle, pts);
+  for (const a of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+    const aa = normalize(a);
+    const t = clockwise
+      ? ((aa - s) % PI2 + PI2) % PI2
+      : ((s - aa) % PI2 + PI2) % PI2;
+    const inArc = t <= sweep + eps;
+    if (inArc) pushPoint(a, pts);
+  }
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
     if (p.x < minX) minX = p.x;
     if (p.y < minY) minY = p.y;
     if (p.x > maxX) maxX = p.x;
@@ -1434,44 +1156,20 @@ function bezierBounds(points: Point[], width: number): Rect {
   if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
     return { x: 0, y: 0, width: 0, height: 0 };
   }
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  return { x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2 };
 }
 
-function cubicBezierPoint(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
-  const mt = 1 - t;
-  const mt2 = mt * mt;
-  const t2 = t * t;
-  const a = mt2 * mt;
-  const b = 3 * mt2 * t;
-  const c = 3 * mt * t2;
-  const d = t2 * t;
-  return { x: a * p0.x + b * p1.x + c * p2.x + d * p3.x, y: a * p0.y + b * p1.y + c * p2.y + d * p3.y };
+function boundsFromPad(pos: Point | undefined, size: { w: number; h: number } | undefined, _rotationDeg: number): Rect {
+  if (!pos || !size) return { x: 0, y: 0, width: 0, height: 0 };
+  const halfW = size.w / 2;
+  const halfH = size.h / 2;
+  const radius = Math.hypot(halfW, halfH);
+  return { x: pos.x - radius, y: pos.y - radius, width: radius * 2, height: radius * 2 };
 }
 
-function cubicBezierExtremaTs(p0: number, p1: number, p2: number, p3: number): number[] {
-  const a = -p0 + 3 * p1 - 3 * p2 + p3;
-  const b = 3 * p0 - 6 * p1 + 3 * p2;
-  const c = -3 * p0 + 3 * p1;
-
-  const A = 3 * a;
-  const B = 2 * b;
-  const C = c;
-  const eps = 1e-12;
-  const out: number[] = [];
-
-  if (Math.abs(A) < eps) {
-    if (Math.abs(B) < eps) return out;
-    const t = -C / B;
-    if (t > 0 && t < 1) out.push(t);
-    return out;
-  }
-
-  const disc = B * B - 4 * A * C;
-  if (disc < 0) return out;
-  const s = Math.sqrt(disc);
-  const t1 = (-B + s) / (2 * A);
-  const t2 = (-B - s) / (2 * A);
-  if (t1 > 0 && t1 < 1) out.push(t1);
-  if (t2 > 0 && t2 < 1) out.push(t2);
-  return out;
+function transformFromPosAndRot(pos: Point, rotationDeg: number): Transform2D {
+  const rad = (rotationDeg * Math.PI) / 180;
+  const c = Math.cos(rad);
+  const s = Math.sin(rad);
+  return { a: c, b: s, c: -s, d: c, e: pos.x, f: pos.y };
 }

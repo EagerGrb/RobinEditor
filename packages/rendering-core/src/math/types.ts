@@ -10,3 +10,11 @@ export type Rect = {
   height: number;
 };
 
+export type Transform2D = {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+};

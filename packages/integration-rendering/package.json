@@ -14,7 +14,7 @@
     "build": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@render/event-bus": "workspace:*"
+    "@render/event-bus": "*"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

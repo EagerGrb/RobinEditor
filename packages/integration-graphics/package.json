@@ -14,9 +14,8 @@
     "build": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@render/event-bus": "workspace:*",
-    "@render/graphics-kernel": "workspace:*",
-    "@render/geometry": "workspace:*"
+    "@render/event-bus": "*",
+    "@render/graphics-kernel": "*"
   },
   "devDependencies": {
     "typescript": "^5.6.3"

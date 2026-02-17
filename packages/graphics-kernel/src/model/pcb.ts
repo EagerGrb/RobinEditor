@@ -588,7 +588,7 @@ function arcBounds(
   width: number
 ): Rect {
   const r = Math.max(0, radius);
-  const pad = 0;
+  const pad = Math.max(0, width) / 2;
   const points: { x: number; y: number }[] = [];
 
   const pushPoint = (angle: number) => {
@@ -622,13 +622,24 @@ function arcBounds(
 }
 
 function isAngleInArc(angle: number, startAngle: number, endAngle: number, clockwise: boolean): boolean {
-  const ccw = clockwise;
-  const delta = angleDeltaSigned(startAngle, endAngle, ccw);
-  const diff = angleDeltaSigned(startAngle, angle, ccw);
+  const PI2 = Math.PI * 2;
+  const normalize = (v: number) => ((v % PI2) + PI2) % PI2;
+  const s = normalize(startAngle);
+  const e = normalize(endAngle);
+  const a = normalize(angle);
   const eps = 1e-12;
-  if (!Number.isFinite(delta) || Math.abs(delta) <= eps) return false;
-  if (delta > 0) return diff >= -eps && diff <= delta + eps;
-  return diff <= eps && diff >= delta - eps;
+
+  if (clockwise) {
+    const sweep = ((e - s) % PI2 + PI2) % PI2; // increasing-angle sweep
+    if (sweep <= eps) return true; // full circle
+    const t = ((a - s) % PI2 + PI2) % PI2;
+    return t <= sweep + eps;
+  }
+
+  const sweep = ((s - e) % PI2 + PI2) % PI2; // decreasing-angle sweep
+  if (sweep <= eps) return true; // full circle
+  const t = ((s - a) % PI2 + PI2) % PI2;
+  return t <= sweep + eps;
 }
 
 function bezierBounds(points: Array<{ x: number; y: number }>, width: number): Rect {

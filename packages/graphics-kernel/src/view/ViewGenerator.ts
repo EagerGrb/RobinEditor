@@ -1,42 +1,13 @@
-
-import type { Point, Rect, Transform2D } from "../math/types.js";
-import type { GridModel, SceneModel, EntityModel } from "../model/models.js";
+import type { Point, Rect } from "../math/types.js";
 import { applyTransformToPoint } from "../math/transform.js";
-import type { 
-  DrawCommand, 
-  DrawCommandState, 
-  DrawStyle, 
-  PolylineCommand, 
-  PathCommand, 
-  PathSegment, 
-  CircleCommand,
-  LineCommand,
-  PolygonCommand
-} from "./drawCommands.js";
-
-import {
-  BoardModel,
-  BoardOutlineModel,
-  FootprintModel,
-  PadModel,
-  TrackModel,
-  ViaModel,
-  LayerStackModel,
-  LayerModel,
-  PcbDocumentModel,
-  PadShape
-} from "../model/pcb.js";
-
-import { PCB_COLORS, LINE_WIDTHS } from "./constants.js";
-import { PadView } from "./shapes/PadView.js";
-import { ViaView } from "./shapes/ViaView.js";
-import { TrackView } from "./shapes/TrackView.js";
-import { Primitive, Arc, Bezier, Line, Polygon, Polyline } from "../model/primitive.js";
+import type { GridModel, SceneModel, EntityModel } from "../model/models.js";
+import type { DrawCommand, DrawCommandState, DrawStyle, PolylineCommand } from "./drawCommands.js";
+import { PCB_COLORS } from "./constants.js";
+import { ArcTrackModel, BezierTrackModel, PadModel, TrackModel, ViaModel } from "../model/pcb.js";
 
 export type ViewGeneratorInput = {
   grid: GridModel;
-  scene?: SceneModel;
-  board?: BoardModel;
+  scene: SceneModel;
   selection: {
     selectedIds: ReadonlySet<string>;
     hoverId: string | null;
@@ -44,45 +15,22 @@ export type ViewGeneratorInput = {
   };
   viewportWorldRect: Rect | null;
   ephemeral: DrawCommand[];
-  ghostEntity?: EntityModel | null;
 };
 
 export class ViewGenerator {
-  private padView = new PadView();
-  private viaView = new ViaView();
-  private trackView = new TrackView();
-
   generate(input: ViewGeneratorInput): DrawCommand[] {
     const commands: DrawCommand[] = [];
-    const { grid, scene, board, selection, viewportWorldRect, ephemeral, ghostEntity } = input;
+    const { grid, scene, selection, viewportWorldRect, ephemeral } = input;
 
     if (grid.visible && viewportWorldRect) {
       commands.push(...this.generateGridCommands(grid, viewportWorldRect));
     }
 
-    let layerStack: LayerStackModel | undefined;
-    let zMap: Map<string, number> | undefined;
-
-    if (board) {
-      layerStack = board.layerStack;
-      zMap = this.buildLayerZMap(layerStack);
-    }
-
-    if (scene) {
-      for (const entity of scene.entities) {
-        commands.push(...this.entityToCommands(entity, this.stateFor(entity.id, selection), layerStack, zMap));
-      }
-    }
-
-    if (board) {
-      commands.push(...this.boardToCommands(board, selection));
+    for (const entity of scene.entities) {
+      commands.push(...this.entityToCommands(entity, this.stateFor(entity.id, selection)));
     }
 
     if (selection.marqueeRect) commands.push(this.marqueeToCommand(selection.marqueeRect));
-
-    if (ghostEntity) {
-      commands.push(...this.entityToCommands(ghostEntity, "normal", layerStack, zMap));
-    }
 
     commands.push(...ephemeral);
 
@@ -96,61 +44,179 @@ export class ViewGenerator {
     return "normal";
   }
 
-  private entityToCommands(entity: EntityModel, state: DrawCommandState, layerStack?: LayerStackModel, zMap?: Map<string, number>): DrawCommand[] {
-    if (entity.type === 'TRACK') {
-      const primitives = this.trackView.render(entity as TrackModel, { state, layerStack, zMap });
-      return primitives.flatMap(p => this.primitiveToCommands(p));
+  private entityToCommands(entity: EntityModel, state: DrawCommandState): DrawCommand[] {
+    const isGhost = entity.id.startsWith("ghost") || entity.metadata?.["ghost"] === true;
+
+    if (entity.type === "TRACK") {
+      const track = entity as unknown as TrackModel;
+      const pts = Array.isArray(track.points) ? track.points : [];
+      if (pts.length < 2) return [];
+
+      const color = typeof track.metadata?.["color"] === "string" ? (track.metadata["color"] as string) : "#CCCCCC";
+      const style = this.styleForState(state, {
+        strokeColor: isGhost ? PCB_COLORS.GHOST : color,
+        lineWidth: Math.max(0.1, track.width ?? 0.5),
+        lineCap: "round",
+        lineJoin: "round",
+        opacity: isGhost ? 0.7 : 1,
+        lineDash: isGhost ? [6, 4] : undefined
+      });
+
+      return [
+        {
+          id: track.id,
+          kind: "polyline",
+          zIndex: isGhost ? 90000 : 5000,
+          state,
+          style,
+          points: pts.map((p) => ({ x: p.x, y: p.y }))
+        }
+      ];
     }
-    if (entity.type === 'ARC_TRACK') {
-      const e: any = entity as any;
-      const zIndex = zMap?.get(e.layerId) ?? 5000;
-      let color = '#ff4d4f';
-      if (e.metadata && typeof e.metadata['color'] === 'string') {
-        color = e.metadata['color'] === "#00e5ff" ? "#ff4d4f" : e.metadata['color'];
-      } else if (layerStack) {
-        color = this.getLayerColor(e.layerId, layerStack);
+
+    if (entity.type === "ARC_TRACK") {
+      const arc = entity as unknown as ArcTrackModel;
+      const color = typeof arc.metadata?.["color"] === "string" ? (arc.metadata["color"] as string) : "#CCCCCC";
+      const style = this.styleForState(state, {
+        strokeColor: isGhost ? PCB_COLORS.GHOST : color,
+        lineWidth: Math.max(0.1, arc.width ?? 0.5),
+        lineCap: "round",
+        lineJoin: "round",
+        opacity: isGhost ? 0.7 : 1,
+        lineDash: isGhost ? [6, 4] : undefined
+      });
+
+      return [
+        {
+          id: arc.id,
+          kind: "arc",
+          zIndex: isGhost ? 90000 : 5000,
+          state,
+          style,
+          center: { x: arc.center.x, y: arc.center.y },
+          radius: arc.radius,
+          startAngle: arc.startAngle,
+          endAngle: arc.endAngle,
+          anticlockwise: !arc.clockwise
+        }
+      ];
+    }
+
+    if (entity.type === "BEZIER_TRACK") {
+      const b = entity as unknown as BezierTrackModel;
+      const color = typeof b.metadata?.["color"] === "string" ? (b.metadata["color"] as string) : "#CCCCCC";
+      const style = this.styleForState(state, {
+        strokeColor: isGhost ? PCB_COLORS.GHOST : color,
+        lineWidth: Math.max(0.1, b.width ?? 0.5),
+        lineCap: "round",
+        lineJoin: "round",
+        opacity: isGhost ? 0.7 : 1,
+        lineDash: isGhost ? [6, 4] : undefined
+      });
+
+      return [
+        {
+          id: b.id,
+          kind: "bezier",
+          zIndex: isGhost ? 90000 : 5000,
+          state,
+          style,
+          p0: { x: b.p0.x, y: b.p0.y },
+          p1: { x: b.p1.x, y: b.p1.y },
+          p2: { x: b.p2.x, y: b.p2.y },
+          p3: { x: b.p3.x, y: b.p3.y }
+        }
+      ];
+    }
+
+    if (entity.type === "PAD") {
+      const pad = entity as unknown as PadModel;
+      const center = applyTransformToPoint(pad.transform, { x: 0, y: 0 });
+      const color = typeof pad.metadata?.["color"] === "string" ? (pad.metadata["color"] as string) : PCB_COLORS.PAD.PLATING_BAR;
+      const baseStyle = this.styleForState(state, {
+        fillColor: isGhost ? PCB_COLORS.GHOST : color,
+        strokeColor: state === "normal" ? "transparent" : PCB_COLORS.SELECTION,
+        lineWidth: 0.2,
+        opacity: isGhost ? 0.6 : 1
+      });
+
+      const out: DrawCommand[] = [];
+
+      if (pad.shape === "circle") {
+        out.push({
+          id: pad.id,
+          kind: "circle",
+          zIndex: isGhost ? 90000 : 6500,
+          state,
+          style: baseStyle,
+          center: { x: center.x, y: center.y },
+          radius: Math.max(0.1, (pad.size?.w ?? 1) / 2)
+        });
+      } else {
+        const w = pad.size?.w ?? 1;
+        const h = pad.size?.h ?? 1;
+        const pts = [
+          applyTransformToPoint(pad.transform, { x: -w / 2, y: -h / 2 }),
+          applyTransformToPoint(pad.transform, { x: w / 2, y: -h / 2 }),
+          applyTransformToPoint(pad.transform, { x: w / 2, y: h / 2 }),
+          applyTransformToPoint(pad.transform, { x: -w / 2, y: h / 2 })
+        ];
+        out.push({
+          id: pad.id,
+          kind: "polygon",
+          zIndex: isGhost ? 90000 : 6500,
+          state,
+          style: baseStyle,
+          points: pts
+        });
       }
-      const drawStyle = this.styleForState(state, { strokeColor: color, lineWidth: e.width, opacity: 1 });
-      const style: any = {
-        stroke: drawStyle.strokeColor,
-        strokeWidth: Math.max(drawStyle.lineWidth ?? 1, 1),
-        opacity: drawStyle.opacity,
-        lineCap: 'round',
-        lineJoin: 'round'
-      };
-      const arc = new Arc(entity.id, e.center, e.radius, e.startAngle, e.endAngle, !!e.clockwise);
-      arc.style = style;
-      (arc as any).zIndex = zIndex;
-      (arc as any).state = state;
-      return this.primitiveToCommands(arc);
+
+      if (pad.drill && pad.drill.diameter > 0) {
+        const holeCenter = applyTransformToPoint(pad.transform, pad.drill.offset ?? { x: 0, y: 0 });
+        out.push({
+          id: `${pad.id}_drill`,
+          kind: "circle",
+          zIndex: 6510,
+          state: "normal",
+          style: { fillColor: PCB_COLORS.PAD.THROUGH_HOLE, strokeColor: "transparent", opacity: 1 },
+          center: { x: holeCenter.x, y: holeCenter.y },
+          radius: Math.max(0.05, pad.drill.diameter / 2)
+        });
+      }
+
+      return out;
     }
-    if (entity.type === 'BEZIER_TRACK') {
-      const e: any = entity as any;
-      const zIndex = zMap?.get(e.layerId) ?? 5000;
-      let color = '#ff4d4f';
-      if (e.metadata && typeof e.metadata['color'] === 'string') color = e.metadata['color'];
-      else if (layerStack) color = this.getLayerColor(e.layerId, layerStack);
-      const drawStyle = this.styleForState(state, { strokeColor: color, lineWidth: e.width, opacity: 1 });
-      const style: any = {
-        stroke: drawStyle.strokeColor,
-        strokeWidth: Math.max(drawStyle.lineWidth ?? 1, 1),
-        opacity: drawStyle.opacity,
-        lineCap: 'round',
-        lineJoin: 'round'
-      };
-      const bez = new Bezier(entity.id, e.p0, e.p1, e.p2, e.p3);
-      bez.style = style;
-      (bez as any).zIndex = zIndex;
-      (bez as any).state = state;
-      return this.primitiveToCommands(bez);
-    }
-    if (entity.type === 'PAD') {
-      const primitives = this.padView.render(entity as PadModel, { state, layerStack, zMap });
-      return primitives.flatMap(p => this.primitiveToCommands(p));
-    }
-    if (entity.type === 'VIA') {
-      const primitives = this.viaView.render(entity as ViaModel, { state, layerStack, zMap });
-      return primitives.flatMap(p => this.primitiveToCommands(p));
+
+    if (entity.type === "VIA") {
+      const via = entity as unknown as ViaModel;
+      const center = applyTransformToPoint(via.transform, { x: 0, y: 0 });
+      const ringStyle = this.styleForState(state, {
+        fillColor: isGhost ? PCB_COLORS.GHOST : PCB_COLORS.PAD.PLATING_BAR,
+        strokeColor: state === "normal" ? "transparent" : PCB_COLORS.SELECTION,
+        lineWidth: 0.2,
+        opacity: isGhost ? 0.6 : 1
+      });
+
+      return [
+        {
+          id: via.id,
+          kind: "circle",
+          zIndex: isGhost ? 90000 : 6500,
+          state,
+          style: ringStyle,
+          center: { x: center.x, y: center.y },
+          radius: Math.max(0.1, via.diameter / 2)
+        },
+        {
+          id: `${via.id}_drill`,
+          kind: "circle",
+          zIndex: 6510,
+          state: "normal",
+          style: { fillColor: PCB_COLORS.PAD.THROUGH_HOLE, strokeColor: "transparent", opacity: 1 },
+          center: { x: center.x, y: center.y },
+          radius: Math.max(0.05, via.drill / 2)
+        }
+      ];
     }
 
     const rect = entity.boundingBox;
@@ -158,103 +224,20 @@ export class ViewGenerator {
     const p1: Point = { x: rect.x + rect.width, y: rect.y };
     const p2: Point = { x: rect.x + rect.width, y: rect.y + rect.height };
     const p3: Point = { x: rect.x, y: rect.y + rect.height };
-    
-    const style = this.styleForState(state, {
-      strokeColor: "#999",
-      lineWidth: 2
-    });
 
-    return [{
-      id: entity.id,
-      kind: "polyline",
-      zIndex: 10,
-      state,
-      style,
-      points: [p0, p1, p2, p3, p0]
-    }];
+    const style = this.styleForState(state, { strokeColor: "#999", lineWidth: 2, opacity: 0.8, lineDash: [4, 4] });
+
+    return [
+      {
+        id: entity.id,
+        kind: "polyline",
+        zIndex: 10,
+        state,
+        style,
+        points: [p0, p1, p2, p3, p0]
+      }
+    ];
   }
-
-  private boardToCommands(board: BoardModel, selection: ViewGeneratorInput["selection"]): DrawCommand[] {
-    const commands: DrawCommand[] = [];
-    const layerZMap = this.buildLayerZMap(board.layerStack);
-
-    if (board.outline) {
-      commands.push(...this.boardOutlineToCommands(board.outline, this.stateFor(board.outline.id, selection)));
-    }
-
-    for (const track of board.tracks.values()) {
-      const primitives = this.trackView.render(track, { state: this.stateFor(track.id, selection), layerStack: board.layerStack, zMap: layerZMap });
-      commands.push(...primitives.flatMap(p => this.primitiveToCommands(p)));
-    }
-
-    for (const via of board.vias.values()) {
-      const primitives = this.viaView.render(via, { state: this.stateFor(via.id, selection), layerStack: board.layerStack, zMap: layerZMap });
-      commands.push(...primitives.flatMap(p => this.primitiveToCommands(p)));
-    }
-
-    for (const pad of board.pads.values()) {
-       const primitives = this.padView.render(pad, { state: this.stateFor(pad.id, selection), layerStack: board.layerStack, zMap: layerZMap });
-       commands.push(...primitives.flatMap(p => this.primitiveToCommands(p)));
-    }
-    
-    for (const footprint of board.footprints.values()) {
-        if (selection.selectedIds.has(footprint.id) || selection.hoverId === footprint.id) {
-           // Maybe render bounding box or similar
-        }
-    }
-
-    return commands;
-  }
-
-  private buildLayerZMap(layerStack: LayerStackModel): Map<string, number> {
-    const map = new Map<string, number>();
-    for (const layer of layerStack.layers) {
-      let baseZ = 5000;
-      if (layer.layerType === 'mechanical') baseZ = 3000;
-      else if (layer.name.toLowerCase().includes('bottom')) baseZ = 4000;
-      else if (layer.name.toLowerCase().includes('top')) baseZ = 6000;
-      
-      map.set(layer.id, baseZ + layer.order * 10);
-    }
-    return map;
-  }
-
-  private getLayerColor(layerId: string, layerStack: LayerStackModel): string {
-    const layer = layerStack.layers.find(l => l.id === layerId);
-    if (!layer) return '#999';
-    if (layer.color) return layer.color;
-    
-    if (layer.name.toLowerCase().includes('top')) {
-      if (layer.layerType === 'silk') return PCB_COLORS.LAYERS.TOP_SILK;
-      return PCB_COLORS.LAYERS.TOP_LAYER;
-    }
-    if (layer.name.toLowerCase().includes('bottom')) {
-      if (layer.layerType === 'silk') return PCB_COLORS.LAYERS.BOTTOM_SILK;
-      return PCB_COLORS.LAYERS.BOTTOM_LAYER;
-    }
-    if (layer.layerType === 'mechanical') return PCB_COLORS.LAYERS.MECH;
-    return '#CCCCCC';
-  }
-
-  private boardOutlineToCommands(outline: BoardOutlineModel, state: DrawCommandState): DrawCommand[] {
-    const points = outline.shape.exterior.points;
-    const pts = points.map(p => applyTransformToPoint(outline.transform, p));
-
-    if (pts.length === 0) return [];
-
-    return [{
-      id: outline.id,
-      kind: "polyline",
-      zIndex: 3500,
-      state,
-      style: this.styleForState(state, {
-        strokeColor: PCB_COLORS.LAYERS.BOARD_OUTLINE,
-        lineWidth: LINE_WIDTHS.OUTLINE
-      }),
-      points: [...pts, pts[0]!]
-    }];
-  }
-
 
   private marqueeToCommand(rect: Rect): PolylineCommand {
     const p0: Point = { x: rect.x, y: rect.y };
@@ -264,7 +247,7 @@ export class ViewGenerator {
     return {
       id: "marquee",
       kind: "polyline",
-      zIndex: 10000,
+      zIndex: 100,
       state: "normal",
       style: { strokeColor: "#3399ff", lineWidth: 1, lineDash: [5, 5], opacity: 0.8 },
       points: [p0, p1, p2, p3, p0]
@@ -292,7 +275,7 @@ export class ViewGenerator {
       commands.push({
         id: `grid_x_${x}`,
         kind: "line",
-        zIndex: 2000,
+        zIndex: -1,
         state: "normal",
         style,
         a: { x, y: startY },
@@ -304,7 +287,7 @@ export class ViewGenerator {
       commands.push({
         id: `grid_y_${y}`,
         kind: "line",
-        zIndex: 2000,
+        zIndex: -1,
         state: "normal",
         style,
         a: { x: startX, y },
@@ -317,185 +300,11 @@ export class ViewGenerator {
 
   private styleForState(state: DrawCommandState, base: DrawStyle): DrawStyle {
     if (state === "selected") {
-      return { ...base, strokeColor: PCB_COLORS.SELECTION };
+      return { ...base, strokeColor: PCB_COLORS.SELECTION, lineWidth: Math.max(base.lineWidth ?? 1, 2) };
     }
     if (state === "hover") {
-      return { ...base, strokeColor: PCB_COLORS.HOVER };
+      return { ...base, strokeColor: PCB_COLORS.HOVER, lineWidth: Math.max(base.lineWidth ?? 1, 2) };
     }
     return base;
-  }
-
-  private primitiveToCommands(primitive: Primitive): DrawCommand[] {
-    const cmds: DrawCommand[] = [];
-    const zIndex = (primitive as any).zIndex ?? 0;
-    const state = (primitive as any).state ?? "normal";
-    
-    const fill = (primitive.style as any)?.fill;
-    const style: any = {
-      fillColor: typeof fill === "string" && fill.length > 0 && fill !== "none" ? fill : undefined,
-      strokeColor: primitive.style?.stroke,
-      lineWidth: primitive.style?.strokeWidth,
-      opacity: primitive.style?.opacity,
-    };
-
-    // Copy extended style properties if available
-    if ((primitive.style as any)?.lineCap) style.lineCap = (primitive.style as any).lineCap;
-    if ((primitive.style as any)?.lineJoin) style.lineJoin = (primitive.style as any).lineJoin;
-    if ((primitive.style as any)?.lineDash) style.lineDash = (primitive.style as any).lineDash;
-
-    if (primitive instanceof Arc) {
-      if (Math.abs(primitive.endAngle - primitive.startAngle) >= Math.PI * 2 - 0.001) {
-         cmds.push({
-           id: primitive.id,
-           kind: "circle",
-           zIndex,
-           state,
-           style,
-           center: primitive.center,
-           radius: primitive.radius
-         });
-      } else {
-         cmds.push({
-           id: primitive.id,
-           kind: "arc",
-           zIndex,
-           state,
-           style,
-           center: primitive.center,
-           radius: primitive.radius,
-           startAngle: primitive.startAngle,
-           endAngle: primitive.endAngle,
-           anticlockwise: !primitive.clockwise
-         });
-      }
-    } else if (primitive instanceof Bezier) {
-      cmds.push({
-        id: primitive.id,
-        kind: "bezier",
-        zIndex,
-        state,
-        style,
-        p0: primitive.p0,
-        p1: primitive.p1,
-        p2: primitive.p2,
-        p3: primitive.p3
-      });
-    } else if (primitive instanceof Polygon) {
-       const segs = primitive.exterior.segments;
-       
-       // Check if all segments are Lines
-       const allLines = segs.every(s => s instanceof Line);
-
-       if (allLines && segs.length > 0) {
-          const pts: Point[] = [];
-          if (segs[0] instanceof Line) {
-             pts.push((segs[0] as Line).start);
-             for (const s of segs) {
-                if (s instanceof Line) pts.push(s.end);
-             }
-          }
-          cmds.push({
-            id: primitive.id,
-            kind: "polygon",
-            zIndex,
-            state,
-            style,
-            points: pts
-          });
-       } else {
-          // Mixed segments (Lines + Arcs), use Path
-          const segments: PathSegment[] = [];
-          for (const seg of segs) {
-              if (seg instanceof Line) {
-                  segments.push({ kind: "line", a: seg.start, b: seg.end });
-              } else if (seg instanceof Arc) {
-                  segments.push({ 
-                    kind: "arc", 
-                    center: seg.center, 
-                    radius: seg.radius, 
-                    startAngle: seg.startAngle, 
-                    endAngle: seg.endAngle, 
-                    anticlockwise: !seg.clockwise 
-                  });
-              } else if (seg instanceof Bezier) {
-                  segments.push({
-                    kind: "bezier",
-                    p0: seg.p0,
-                    p1: seg.p1,
-                    p2: seg.p2,
-                    p3: seg.p3
-                  });
-              }
-          }
-          cmds.push({
-            id: primitive.id,
-            kind: "path",
-            zIndex,
-            state,
-            style,
-            segments,
-            closed: true
-          });
-       }
-    } else if (primitive instanceof Polyline) {
-       // Check if it's a simple line strip (Track)
-       const allLines = primitive.segments.every(s => s instanceof Line);
-       // Check connectivity? Assuming connected for simplicity or checking first/last
-       // For Tracks, we know they are connected lines.
-       
-       if (allLines && primitive.segments.length > 0) {
-          // Convert to polyline command (points) for better lineJoin support
-          const pts: Point[] = [];
-          const first = primitive.segments[0] as Line;
-          pts.push(first.start);
-          for (const s of primitive.segments) {
-             if (s instanceof Line) pts.push(s.end);
-          }
-          
-          cmds.push({
-             id: primitive.id,
-             kind: "polyline",
-             zIndex,
-             state,
-             style,
-             points: pts
-          });
-       } else {
-           const segments: PathSegment[] = [];
-           for (const seg of primitive.segments) {
-              if (seg instanceof Line) {
-                 segments.push({ kind: "line", a: seg.start, b: seg.end });
-              } else if (seg instanceof Arc) {
-                 segments.push({ 
-                   kind: "arc", 
-                   center: seg.center, 
-                   radius: seg.radius, 
-                   startAngle: seg.startAngle, 
-                   endAngle: seg.endAngle,
-                   anticlockwise: !seg.clockwise
-                 });
-              } else if (seg instanceof Bezier) {
-                 segments.push({
-                   kind: "bezier",
-                   p0: seg.p0,
-                   p1: seg.p1,
-                   p2: seg.p2,
-                   p3: seg.p3
-                 });
-              }
-           }
-           cmds.push({
-             id: primitive.id,
-             kind: "path",
-             zIndex,
-             state,
-             style,
-             segments,
-             closed: !!style.fillColor // Close if filled
-           });
-       }
-    }
-
-    return cmds;
   }
 }

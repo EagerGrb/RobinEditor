@@ -1,7 +1,4 @@
 import { Topics, type EventBus } from "@render/event-bus";
-import { Vec2, intersect, evalPoint, capsuleFromCenter, circleCurve, rotatedRectLines, type Arc2, type Bezier2, type Curve2, type Line2 } from "@render/geometry";
-import { makeIntersectionDebugCommands } from "@render/graphics-kernel";
-import { decodeClipboardPayload, encodeClipboardPayload, rectCenter, type RenderClipboardPayloadV1 } from "./clipboard/renderClipboard";
 import type {
   GraphicsKernelEvent,
   IGraphicsKernel,
@@ -11,6 +8,7 @@ import type {
   SetToolParams
 } from "@render/graphics-kernel";
 import type { Rect, Transform2D } from "@render/rendering-core";
+import { decodeClipboardPayload, encodeClipboardPayload } from "./clipboard/renderClipboard";
 
 export class GraphicsMediator {
   private unsubscribes: Array<() => void> = [];
@@ -21,10 +19,8 @@ export class GraphicsMediator {
   private pendingDirtyRects: Rect[] = [];
   private lastViewport: { scale: number; offsetX: number; offsetY: number } | null = null;
   private lastViewTransform: Transform2D | null = null;
-  private viewportSize: { width: number; height: number } | null = null;
-  private debugIntersectionDemoActive = false;
-  private intersectionRafId: number | null = null;
   private lastSelectionSetEmitted: { idsKey: string; boundsKey: string } | null = null;
+  private internalClipboardText: string | null = null;
   private pendingMove: {
     x: number;
     y: number;
@@ -33,10 +29,6 @@ export class GraphicsMediator {
     timestamp: number;
   } | null = null;
   private moveRafId: number | null = null;
-  private lastMouseScreen: { x: number; y: number } | null = null;
-  private clipboardMemory: { text: string; parsed: RenderClipboardPayloadV1 | null } | null = null;
-  private pasteSequence = 0;
-  private pasteSequenceKey: number | null = null;
 
   private transformDrag:
     | {
@@ -69,26 +61,20 @@ export class GraphicsMediator {
           this.kernel.resetViewport();
           return;
         }
-        if (payload.command === "DEBUG.INTERSECTION_DEMO") {
-          this.debugIntersectionDemoActive = !this.debugIntersectionDemoActive;
-          if (!this.debugIntersectionDemoActive) {
-            this.kernel.setEphemeralDrawCommands([]);
-            return;
-          }
-          this.scheduleIntersectionOverlayUpdate();
-          return;
-        }
-        if (payload.command === "DEBUG.INTERSECTION_CLEAR") {
-          this.debugIntersectionDemoActive = false;
-          this.kernel.setEphemeralDrawCommands([]);
-          return;
-        }
         if (payload.command === "EDIT.COPY") {
-          void this.copySelectionToClipboard();
+          this.copySelectionToClipboard();
           return;
         }
         if (payload.command === "EDIT.PASTE") {
           void this.pasteFromClipboard();
+          return;
+        }
+        if (payload.command === "DEBUG.INTERSECTION_DEMO") {
+          this.kernel.runIntersectionDebug();
+          return;
+        }
+        if (payload.command === "DEBUG.INTERSECTION_CLEAR") {
+          this.kernel.setTool({ type: "selection" });
           return;
         }
       }),
@@ -113,7 +99,7 @@ export class GraphicsMediator {
         const startScreen = { x: payload.x, y: payload.y };
         const bounds = this.kernel.getSelectionBounds();
         if (!bounds) return;
-        const pivotWorld = pivotFromBoundsAndHandle(bounds, payload.handleType);
+        const pivotWorld = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
 
         this.kernel.beginSelectionTransform(1);
         this.transformDrag = {
@@ -135,7 +121,7 @@ export class GraphicsMediator {
         const currentScreen = { x: payload.x, y: payload.y };
         const currentWorld = applyTransform2D(inv, currentScreen);
 
-        const t = this.mapHandleDragToTransform(state.handleType, startWorld, currentWorld, state.pivotWorld, payload.modifiers);
+        const t = this.mapHandleDragToTransform(state.handleType, startWorld, currentWorld, state.pivotWorld);
         if (!t) return;
         this.kernel.updateSelectionTransform(t);
       }),
@@ -170,7 +156,6 @@ export class GraphicsMediator {
       this.bus.subscribe(Topics.INPUT_MOUSE_MOVE, (payload) => {
         if ((payload.buttons & 2) === 2) return;
         if (this.boxSelectionActive) return;
-        this.lastMouseScreen = { x: payload.x, y: payload.y };
         this.pendingMove = {
           x: payload.x,
           y: payload.y,
@@ -344,7 +329,6 @@ export class GraphicsMediator {
 
     this.unsubscribes.push(
       this.bus.subscribe(Topics.INPUT_CANVAS_RESIZED, (payload) => {
-        this.viewportSize = { width: payload.width, height: payload.height };
         this.kernel.setViewportSize({ width: payload.width, height: payload.height });
       }),
     );
@@ -355,7 +339,6 @@ export class GraphicsMediator {
           const next = this.mapSelection(event.selectedIds);
           this.bus.publish(Topics.GRAPHICS_SELECTION_CHANGED, next);
           this.emitSelectionSetIfChanged();
-          this.scheduleIntersectionOverlayUpdate();
           return;
         }
 
@@ -370,7 +353,6 @@ export class GraphicsMediator {
 
         if (event.type === "GRAPHICS.SCENE_CHANGED") {
           this.pendingDirtyRects = event.changes.affectedBounds.map((r) => inflateRect(r, 600));
-          this.scheduleIntersectionOverlayUpdate();
           return;
         }
 
@@ -388,6 +370,44 @@ export class GraphicsMediator {
         }
       }),
     );
+  }
+
+  private async copySelectionToClipboard() {
+    const selectedIds = this.kernel.getSelection();
+    if (selectedIds.length === 0) return;
+    const entities = this.kernel.exportEntities(selectedIds);
+    const text = encodeClipboardPayload({
+      app: "render",
+      version: 1,
+      kind: "pcb.entities",
+      createdAt: Date.now(),
+      bounds: this.kernel.getSelectionBounds(),
+      entities
+    });
+    this.internalClipboardText = text;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      }
+    } catch {
+      // ignore; internal clipboard will be used as fallback
+    }
+  }
+
+  private async pasteFromClipboard() {
+    let text: string | null = null;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
+        text = await navigator.clipboard.readText();
+      }
+    } catch {
+      text = null;
+    }
+    if (!text) text = this.internalClipboardText;
+    if (!text) return;
+    const payload = decodeClipboardPayload(text);
+    if (!payload) return;
+    this.kernel.pasteEntities(payload.entities, { offset: { x: 10, y: 10 }, select: true });
   }
 
   detach() {
@@ -470,7 +490,6 @@ export class GraphicsMediator {
     startWorld: { x: number; y: number },
     currentWorld: { x: number; y: number },
     pivotWorld: { x: number; y: number },
-    modifiers: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean },
   ): SelectionTransform | null {
     if (handleType === "move") {
       return {
@@ -493,7 +512,7 @@ export class GraphicsMediator {
     const sy1 = currentWorld.y - pivotWorld.y;
     const eps = 1e-9;
 
-    if (handleType.includes("scale-") && modifiers.shiftKey) {
+    if (handleType.includes("scale-")) {
       const uniform0 = Math.hypot(sx0, sy0);
       const uniform1 = Math.hypot(sx1, sy1);
       if (uniform0 < eps) return null;
@@ -531,181 +550,21 @@ export class GraphicsMediator {
     if (prev && prev.idsKey === idsKey && prev.boundsKey === boundsKey) return;
     this.lastSelectionSetEmitted = { idsKey, boundsKey };
 
+    const entities = selectedIds.length > 0 ? this.kernel.exportEntities(selectedIds) : [];
+    let entityCount = 0;
+    for (const e of entities) {
+      if ((e as any).type === "TRACK" && Array.isArray((e as any).points)) {
+        entityCount += Math.max(1, (e as any).points.length - 1);
+        continue;
+      }
+      entityCount += 1;
+    }
+
     this.bus.publish(Topics.GRAPHICS_SELECTION_SET_CHANGED, {
       selectedIds,
-      bounds: bounds ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null
+      bounds: bounds ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null,
+      entityCount
     });
-  }
-
-  private scheduleIntersectionOverlayUpdate(): void {
-    if (!this.debugIntersectionDemoActive) return;
-    if (this.intersectionRafId != null) return;
-    this.intersectionRafId = safeRequestAnimationFrame(() => {
-      this.intersectionRafId = null;
-      this.updateIntersectionOverlay();
-    });
-  }
-
-  private updateIntersectionOverlay(): void {
-    if (!this.debugIntersectionDemoActive) return;
-
-    const selectedIds = this.kernel.getSelection();
-    if (selectedIds.length < 2) {
-      this.kernel.setEphemeralDrawCommands([]);
-      return;
-    }
-
-    const scene = this.kernel.save() as any;
-    const entities: any[] = selectedIds
-      .map((id) => scene.entities.find((e: any) => e.id === id))
-      .filter(Boolean);
-
-    if (entities.length < 2) {
-      this.kernel.setEphemeralDrawCommands([]);
-      return;
-    }
-
-    const curveSets = entities.map((e) => ({ curves: entityToCurves(e) }));
-
-    const points: Array<{ x: number; y: number }> = [];
-    const debugShapes: any[] = [];
-    const palette = ["#2f54eb", "#13c2c2", "#52c41a", "#faad14", "#eb2f96", "#722ed1"];
-
-    for (let i = 0; i < curveSets.length; i++) {
-      const color = palette[i % palette.length]!;
-      const set = curveSets[i]!;
-      for (let k = 0; k < set.curves.length; k++) {
-        const c = set.curves[k]!;
-        if (c.kind === "line") {
-          debugShapes.push({ kind: "line", a: c.a, b: c.b, style: { strokeColor: color, lineWidth: 1, opacity: 0.7 } });
-        } else if (c.kind === "arc") {
-          debugShapes.push({
-            kind: "arc",
-            center: c.c,
-            radius: c.r,
-            startAngle: c.start,
-            endAngle: c.start + c.delta,
-            anticlockwise: c.delta < 0,
-            style: { strokeColor: color, lineWidth: 1, opacity: 0.7 }
-          });
-        } else if (c.kind === "bezier" && c.degree === 3 && c.cp.length === 4) {
-          debugShapes.push({
-            kind: "bezier",
-            p0: c.cp[0],
-            p1: c.cp[1],
-            p2: c.cp[2],
-            p3: c.cp[3],
-            style: { strokeColor: color, lineWidth: 1, opacity: 0.7 }
-          });
-        }
-      }
-    }
-
-    for (let i = 0; i < curveSets.length; i++) {
-      for (let j = i + 1; j < curveSets.length; j++) {
-        const a = curveSets[i]!;
-        const b = curveSets[j]!;
-        for (const c0 of a.curves) {
-          for (const c1 of b.curves) {
-            const out = intersect(c0, c1, { distanceEpsilon: 1e-2, maxDepth: 24 });
-            for (const it of out.items) {
-              if (it.kind !== "point") continue;
-              const p = evalPoint(c0 as any, (it as any).t0);
-              points.push(p);
-            }
-          }
-        }
-      }
-    }
-
-    const uniq = dedupePoints(points, 1e-2);
-    const shapes: any[] = [...debugShapes];
-    for (let i = 0; i < uniq.length; i++) {
-      const p = uniq[i]!;
-      shapes.push({
-        kind: "point",
-        p,
-        rWorld: 6,
-        style: { fillColor: "#ffe58f", strokeColor: "#000000", lineWidth: 1, opacity: 0.95 }
-      });
-    }
-
-    const commands = makeIntersectionDebugCommands(shapes, { layer: 100000, zIndex: 100000, pointRadiusWorld: 6 });
-    this.kernel.setEphemeralDrawCommands(commands);
-  }
-
-  private getPasteTargetWorld(): { x: number; y: number } {
-    const view = this.lastViewTransform;
-    if (!view) return { x: 0, y: 0 };
-    const inv = invertTransform2D(view);
-    if (this.lastMouseScreen) return applyTransform2D(inv, this.lastMouseScreen);
-    const size = this.viewportSize;
-    if (size) return applyTransform2D(inv, { x: size.width / 2, y: size.height / 2 });
-    return applyTransform2D(inv, { x: 0, y: 0 });
-  }
-
-  private async writeClipboardText(text: string): Promise<void> {
-    this.clipboardMemory = { text, parsed: decodeClipboardPayload(text) };
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        await navigator.clipboard.writeText(text);
-      }
-    } catch {
-    }
-  }
-
-  private async readClipboardText(): Promise<string | null> {
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.readText === "function") {
-        return await navigator.clipboard.readText();
-      }
-    } catch {
-    }
-    return this.clipboardMemory?.text ?? null;
-  }
-
-  private async copySelectionToClipboard(): Promise<void> {
-    const selectedIds = this.kernel.getSelection();
-    if (selectedIds.length === 0) return;
-    const scene = this.kernel.save() as any;
-    const entities: any[] = selectedIds.map((id) => scene.entities.find((e: any) => e.id === id)).filter(Boolean);
-    if (entities.length === 0) return;
-    const bounds = this.kernel.getSelectionBounds();
-
-    const payload: RenderClipboardPayloadV1 = {
-      app: "render",
-      version: 1,
-      kind: "pcb.entities",
-      createdAt: Date.now(),
-      bounds,
-      entities: JSON.parse(JSON.stringify(entities))
-    };
-
-    const text = encodeClipboardPayload(payload);
-    this.pasteSequence = 0;
-    this.pasteSequenceKey = payload.createdAt;
-    await this.writeClipboardText(text);
-  }
-
-  private async pasteFromClipboard(): Promise<void> {
-    const text = await this.readClipboardText();
-    if (!text) return;
-    const payload = decodeClipboardPayload(text);
-    if (!payload) return;
-
-    const key = payload.createdAt;
-    if (this.pasteSequenceKey !== key) {
-      this.pasteSequence = 0;
-      this.pasteSequenceKey = key;
-    }
-
-    const bounds = payload.bounds;
-    const target = this.getPasteTargetWorld();
-    const base = bounds ? rectCenter(bounds) : target;
-    const step = 10 * this.pasteSequence;
-    const offset = { x: target.x - base.x + step, y: target.y - base.y + step };
-    this.pasteSequence++;
-    this.kernel.pasteEntities(payload.entities, { offset, label: "Paste", select: true });
   }
 }
 
@@ -748,111 +607,4 @@ function inflateRect(r: Rect, amount: number): Rect {
 function safeRequestAnimationFrame(cb: FrameRequestCallback): number {
   if (typeof requestAnimationFrame === "function") return requestAnimationFrame(cb);
   return setTimeout(() => cb(Date.now()), 16) as unknown as number;
-}
-
-function pivotFromBoundsAndHandle(bounds: Rect, handleType: string): { x: number; y: number } {
-  const nw = { x: bounds.x, y: bounds.y };
-  const ne = { x: bounds.x + bounds.width, y: bounds.y };
-  const se = { x: bounds.x + bounds.width, y: bounds.y + bounds.height };
-  const sw = { x: bounds.x, y: bounds.y + bounds.height };
-  if (handleType === "scale-nw") return se;
-  if (handleType === "scale-ne") return sw;
-  if (handleType === "scale-se") return nw;
-  if (handleType === "scale-sw") return ne;
-  return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
-}
-
-function angleDeltaSigned(from: number, to: number, ccw: boolean): number {
-  const PI2 = Math.PI * 2;
-  const normalize = (v: number) => ((v % PI2) + PI2) % PI2;
-  const f = normalize(from);
-  const t = normalize(to);
-  let d = t - f;
-  if (ccw) {
-    if (d < 0) d += PI2;
-    return d;
-  }
-  if (d > 0) d -= PI2;
-  return d;
-}
-
-function arcTrackCenterlineCurve(entity: any): Arc2 | null {
-  if (!entity?.center || typeof entity.radius !== "number" || typeof entity.startAngle !== "number" || typeof entity.endAngle !== "number") {
-    return null;
-  }
-  const delta = angleDeltaSigned(entity.startAngle, entity.endAngle, !!entity.clockwise);
-  if (!Number.isFinite(delta) || Math.abs(delta) <= 1e-12) return null;
-  return { kind: "arc", c: { x: entity.center.x, y: entity.center.y }, r: entity.radius, start: entity.startAngle, delta };
-}
-
-function entityToCurves(entity: any): Curve2[] {
-  if (entity?.type === "VIA" && entity.position && typeof entity.diameter === "number") {
-    return [circleCurve(entity.position, entity.diameter / 2)];
-  }
-
-  if (entity?.type === "PAD" && entity.position && entity.size && typeof entity.rotation === "number") {
-    const rot = (entity.rotation * Math.PI) / 180;
-    const w = entity.size.w as number;
-    const h = entity.size.h as number;
-    if (entity.shape === "circle") return [circleCurve(entity.position, Math.min(w, h) / 2)];
-    if (entity.shape === "oval") return capsuleFromCenter(entity.position, w, h, rot);
-    return rotatedRectLines(entity.position, w, h, rot);
-  }
-
-  if (entity?.type === "TRACK" && Array.isArray(entity.points) && typeof entity.width === "number") {
-    const out: Curve2[] = [];
-    const pts = entity.points as Array<{ x: number; y: number }>;
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = pts[i]!;
-      const b = pts[i + 1]!;
-      const len = Math.hypot(b.x - a.x, b.y - a.y);
-      if (!Number.isFinite(len) || len <= 1e-9) continue;
-      out.push({ kind: "line", a, b });
-    }
-    return out;
-  }
-
-  if (entity?.type === "ARC_TRACK") {
-    const centerline = arcTrackCenterlineCurve(entity);
-    return centerline ? [centerline] : [];
-  }
-
-  if (entity?.type === "BEZIER_TRACK") {
-    const p0 = entity?.p0;
-    const p1 = entity?.p1;
-    const p2 = entity?.p2;
-    const p3 = entity?.p3;
-    if (!p0 || !p1 || !p2 || !p3) return [];
-    const bez: Bezier2 = { kind: "bezier", degree: 3, cp: [p0, p1, p2, p3] };
-    return [bez];
-  }
-
-  if (entity?.boundingBox) {
-    const b = entity.boundingBox as Rect;
-    const a: Line2 = { kind: "line", a: { x: b.x, y: b.y }, b: { x: b.x + b.width, y: b.y } };
-    const c: Line2 = { kind: "line", a: { x: b.x + b.width, y: b.y }, b: { x: b.x + b.width, y: b.y + b.height } };
-    const d: Line2 = { kind: "line", a: { x: b.x + b.width, y: b.y + b.height }, b: { x: b.x, y: b.y + b.height } };
-    const e: Line2 = { kind: "line", a: { x: b.x, y: b.y + b.height }, b: { x: b.x, y: b.y } };
-    return [a, c, d, e];
-  }
-
-  return [];
-}
-
-function dedupePoints(points: Array<{ x: number; y: number }>, eps: number): Array<{ x: number; y: number }> {
-  const out: Array<{ x: number; y: number }> = [];
-  const epsSq = eps * eps;
-  for (const p of points) {
-    let ok = true;
-    for (const q of out) {
-      const dx = p.x - q.x;
-      const dy = p.y - q.y;
-      if (dx * dx + dy * dy <= epsSq) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) out.push(p);
-  }
-  return out;
 }

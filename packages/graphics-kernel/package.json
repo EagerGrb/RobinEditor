@@ -7,11 +7,11 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node --test dist"
+    "test": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node --test dist/graphics-kernel/test"
   },
   "dependencies": {
-    "@render/rendering-core": "workspace:*",
-    "@render/geometry": "workspace:*"
+    "@render/geometry": "*",
+    "@render/rendering-core": "*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

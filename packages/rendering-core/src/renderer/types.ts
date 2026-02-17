@@ -1,5 +1,5 @@
 import type { DrawCommand } from "../scene/drawCommands.js";
-import type { Rect } from "../math/types.js";
+import type { Rect, Transform2D } from "../math/types.js";
 
 export type RendererError = {
   message: string;
@@ -27,5 +27,5 @@ export type SceneDrawData = {
   commands: DrawCommand[];
   dirtyRects?: Rect[];
   fullRedraw?: boolean;
+  viewTransform?: Transform2D;
 };
-

@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function resolveTsFromJsExtension() {
   return {
@@ -13,7 +14,7 @@ function resolveTsFromJsExtension() {
       if (!source.endsWith(".js")) return null;
 
       const absImporter = importer.startsWith("file://")
-        ? new URL(importer).pathname
+        ? fileURLToPath(importer)
         : importer;
 
       const importerDir = path.dirname(absImporter);

@@ -80,9 +80,6 @@ export class SceneManager {
     };
 
     this.entities.set(id, next);
-    // Optimization: Only update spatial index if bounds changed significantly
-    // For now, always update to be safe, but QuadTree rebuild is expensive if called frequently.
-    // Ideally SpatialIndex should handle updates efficiently.
     this.spatial.set(id, next.boundingBox);
 
     return {

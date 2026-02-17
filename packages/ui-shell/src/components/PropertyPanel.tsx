@@ -52,10 +52,17 @@ function PropertyForm({
 export function PropertyPanel({ bus }: PropertyPanelProps) {
   const [selection, setSelection] = useState<SelectionPayload>({ type: "none" });
   const [metadata, setMetadata] = useState<Record<string, unknown>>({});
+  const [entityCount, setEntityCount] = useState(0);
 
   useEffect(() => {
     return bus.subscribe(Topics.GRAPHICS_SELECTION_CHANGED, (payload) => {
       setSelection(payload);
+    });
+  }, [bus]);
+
+  useEffect(() => {
+    return bus.subscribe(Topics.GRAPHICS_SELECTION_SET_CHANGED, (payload) => {
+      setEntityCount(payload.entityCount ?? 0);
     });
   }, [bus]);
 
@@ -75,9 +82,10 @@ export function PropertyPanel({ bus }: PropertyPanelProps) {
   }, [bus, selection]);
 
   const header = useMemo(() => {
-    if (!("id" in selection)) return "属性";
-    return `属性 - ${selection.type} (${selection.id})`;
-  }, [selection]);
+    const countPart = entityCount > 0 ? `（已选 ${entityCount}）` : "";
+    if (!("id" in selection)) return `属性${countPart}`;
+    return `属性${countPart} - ${selection.type} (${selection.id})`;
+  }, [selection, entityCount]);
 
   const onValuesChange = (changed: { metadata?: Record<string, unknown> }) => {
     if (!("id" in selection)) return;

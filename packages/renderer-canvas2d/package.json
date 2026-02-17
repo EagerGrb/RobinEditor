@@ -10,7 +10,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@render/rendering-core": "workspace:*"
+    "@render/rendering-core": "*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

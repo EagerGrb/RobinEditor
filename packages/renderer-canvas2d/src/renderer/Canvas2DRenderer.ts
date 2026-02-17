@@ -5,6 +5,7 @@ import type {
   IRenderer2D,
   Point,
   Rect,
+  Transform2D,
   RendererDiagnostics,
   RendererOptions,
   SceneDrawData
@@ -90,10 +91,12 @@ function mergeOverlappingRects(rects: Rect[]): Rect[] {
     for (let i = 0; i < result.length; i++) {
       const existing = result[i];
       if (!existing) continue;
+      if (existing === merged) continue;
       if (rectsOverlap(existing, merged)) {
-        result[i] = mergeRects(existing, merged);
+        const next = mergeRects(existing, merged);
+        result[i] = next;
         didMerge = true;
-        merged = result[i];
+        merged = next;
         i = -1;
       }
     }
@@ -168,6 +171,33 @@ function commandBBox(command: DrawCommand, ctx: CanvasRenderingContext2D | null)
     case "polygon": {
       return expandRect(bboxFromPoints(command.points), pad);
     }
+    case "bezier": {
+      return expandRect(bboxFromPoints([command.p0, command.p1, command.p2, command.p3]), pad);
+    }
+    case "path": {
+      const points: Point[] = [];
+      for (const s of command.segments) {
+        if (s.kind === "line") {
+          points.push(s.a, s.b);
+        } else if (s.kind === "bezier") {
+          points.push(s.p0, s.p1, s.p2, s.p3);
+        } else {
+          const r = Math.max(0, s.radius);
+          points.push(
+            { x: s.center.x - r, y: s.center.y - r },
+            { x: s.center.x + r, y: s.center.y - r },
+            { x: s.center.x + r, y: s.center.y + r },
+            { x: s.center.x - r, y: s.center.y + r },
+          );
+        }
+      }
+      return expandRect(bboxFromPoints(points), pad);
+    }
+    case "polygonHoles": {
+      const points: Point[] = [...command.exterior];
+      for (const h of command.holes) points.push(...h);
+      return expandRect(bboxFromPoints(points), pad);
+    }
     case "arc": {
       const r = Math.max(0, command.radius);
       return expandRect(
@@ -234,6 +264,53 @@ function layerOrder(layer: number | undefined): number {
   return layer ?? 0;
 }
 
+function identityTransform2D(): Transform2D {
+  return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+}
+
+function invertTransform2D(t: Transform2D): Transform2D | null {
+  const det = t.a * t.d - t.b * t.c;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+  const invDet = 1 / det;
+  const a = t.d * invDet;
+  const b = -t.b * invDet;
+  const c = -t.c * invDet;
+  const d = t.a * invDet;
+  const e = (t.c * t.f - t.d * t.e) * invDet;
+  const f = (t.b * t.e - t.a * t.f) * invDet;
+  return { a, b, c, d, e, f };
+}
+
+function applyTransform2D(t: Transform2D, p: Point): Point {
+  return { x: t.a * p.x + t.c * p.y + t.e, y: t.b * p.x + t.d * p.y + t.f };
+}
+
+function rectFromPoints2D(points: Point[]): Rect {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function worldRectFromScreenRect(screenRect: Rect, screenToWorld: Transform2D | null): Rect | null {
+  if (!screenToWorld) return null;
+  const p0 = applyTransform2D(screenToWorld, { x: screenRect.x, y: screenRect.y });
+  const p1 = applyTransform2D(screenToWorld, { x: screenRect.x + screenRect.width, y: screenRect.y });
+  const p2 = applyTransform2D(screenToWorld, { x: screenRect.x + screenRect.width, y: screenRect.y + screenRect.height });
+  const p3 = applyTransform2D(screenToWorld, { x: screenRect.x, y: screenRect.y + screenRect.height });
+  return rectFromPoints2D([p0, p1, p2, p3]);
+}
+
 function resolveStyle(command: DrawCommand): ResolvedStyle {
   const state: DrawCommandState = command.state ?? "normal";
   const stateOverride = STATE_OVERRIDES[state];
@@ -291,6 +368,8 @@ export class Canvas2DRenderer implements IRenderer2D {
   private width = 0;
   private height = 0;
 
+  private viewTransform: Transform2D = identityTransform2D();
+
   private sceneCommands: DrawCommand[] = [];
   private sorted: SortedCommand[] = [];
 
@@ -331,6 +410,10 @@ export class Canvas2DRenderer implements IRenderer2D {
     this.sceneCommands = data.commands;
     this.sorted = this.sortCommands(this.sceneCommands);
 
+    if (data.viewTransform) {
+      this.viewTransform = data.viewTransform;
+    }
+
     const useDirtyRects = this.options.useDirtyRects === true;
     const fullRedraw = data.fullRedraw === true || !useDirtyRects;
     if (fullRedraw) {
@@ -355,13 +438,25 @@ export class Canvas2DRenderer implements IRenderer2D {
     let drawCalls = 0;
     let stateChanges = 0;
 
+    const screenToWorld = invertTransform2D(this.viewTransform);
+    const dpr = this.dpr;
+
     const pending = this.pendingDirtyRects;
     const useDirtyRects = this.options.useDirtyRects === true;
     const dirtyRects = useDirtyRects && pending.length > 0 ? mergeOverlappingRects(pending) : [];
     this.pendingDirtyRects = [];
 
     if (!useDirtyRects || dirtyRects.length === 0) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       this.clearRegion(null);
+      ctx.setTransform(
+        dpr * this.viewTransform.a,
+        dpr * this.viewTransform.b,
+        dpr * this.viewTransform.c,
+        dpr * this.viewTransform.d,
+        dpr * this.viewTransform.e,
+        dpr * this.viewTransform.f
+      );
       const stats = this.drawCommands(ctx, this.sorted, null);
       drawCalls += stats.drawCalls;
       stateChanges += stats.stateChanges;
@@ -371,11 +466,22 @@ export class Canvas2DRenderer implements IRenderer2D {
         if (!clipped) continue;
 
         ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.beginPath();
         ctx.rect(clipped.x, clipped.y, clipped.width, clipped.height);
         ctx.clip();
         this.clearRegion(clipped);
-        const stats = this.drawCommands(ctx, this.sorted, clipped);
+
+        ctx.setTransform(
+          dpr * this.viewTransform.a,
+          dpr * this.viewTransform.b,
+          dpr * this.viewTransform.c,
+          dpr * this.viewTransform.d,
+          dpr * this.viewTransform.e,
+          dpr * this.viewTransform.f
+        );
+        const worldClip = worldRectFromScreenRect(clipped, screenToWorld);
+        const stats = this.drawCommands(ctx, this.sorted, worldClip);
         drawCalls += stats.drawCalls;
         stateChanges += stats.stateChanges;
         ctx.restore();
@@ -596,6 +702,80 @@ export class Canvas2DRenderer implements IRenderer2D {
         }
         return calls;
       }
+      case "bezier": {
+        if (style.strokeColor == null) return 0;
+        ctx.beginPath();
+        ctx.moveTo(command.p0.x, command.p0.y);
+        ctx.bezierCurveTo(command.p1.x, command.p1.y, command.p2.x, command.p2.y, command.p3.x, command.p3.y);
+        ctx.stroke();
+        return 1;
+      }
+      case "path": {
+        const segs = command.segments;
+        if (segs.length === 0) return 0;
+
+        ctx.beginPath();
+        let last: Point | null = null;
+        for (const s of segs) {
+          if (s.kind === "line") {
+            if (!last || last.x !== s.a.x || last.y !== s.a.y) ctx.moveTo(s.a.x, s.a.y);
+            ctx.lineTo(s.b.x, s.b.y);
+            last = s.b;
+            continue;
+          }
+
+          if (s.kind === "bezier") {
+            if (!last || last.x !== s.p0.x || last.y !== s.p0.y) ctx.moveTo(s.p0.x, s.p0.y);
+            ctx.bezierCurveTo(s.p1.x, s.p1.y, s.p2.x, s.p2.y, s.p3.x, s.p3.y);
+            last = s.p3;
+            continue;
+          }
+
+          const r = Math.max(0, s.radius);
+          const start = { x: s.center.x + Math.cos(s.startAngle) * r, y: s.center.y + Math.sin(s.startAngle) * r };
+          if (!last || last.x !== start.x || last.y !== start.y) ctx.moveTo(start.x, start.y);
+          ctx.arc(s.center.x, s.center.y, r, s.startAngle, s.endAngle, s.anticlockwise ?? false);
+          last = { x: s.center.x + Math.cos(s.endAngle) * r, y: s.center.y + Math.sin(s.endAngle) * r };
+        }
+
+        if (command.closed) ctx.closePath();
+        let calls = 0;
+        if (style.fillColor != null) {
+          ctx.fill();
+          calls++;
+        }
+        if (style.strokeColor != null) {
+          ctx.stroke();
+          calls++;
+        }
+        return calls;
+      }
+      case "polygonHoles": {
+        const exterior = command.exterior;
+        if (exterior.length < 3) return 0;
+        ctx.beginPath();
+        ctx.moveTo(exterior[0]!.x, exterior[0]!.y);
+        for (let i = 1; i < exterior.length; i++) ctx.lineTo(exterior[i]!.x, exterior[i]!.y);
+        ctx.closePath();
+
+        for (const hole of command.holes) {
+          if (hole.length < 3) continue;
+          ctx.moveTo(hole[0]!.x, hole[0]!.y);
+          for (let i = 1; i < hole.length; i++) ctx.lineTo(hole[i]!.x, hole[i]!.y);
+          ctx.closePath();
+        }
+
+        let calls = 0;
+        if (style.fillColor != null) {
+          ctx.fill(command.fillRule ?? "nonzero");
+          calls++;
+        }
+        if (style.strokeColor != null) {
+          ctx.stroke();
+          calls++;
+        }
+        return calls;
+      }
       case "arc": {
         if (style.strokeColor == null && style.fillColor == null) return 0;
         ctx.beginPath();
@@ -676,4 +856,3 @@ export class Canvas2DRenderer implements IRenderer2D {
     }
   }
 }
-

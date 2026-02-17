@@ -58,27 +58,22 @@ export function DialogHost({ bus }: DialogHostProps) {
     current?.onCancel?.();
   };
 
+  const showCancel = active?.type !== "ALERT";
+
   return (
     <Modal
       open={open}
       title={title}
       onOk={onOk}
       onCancel={onCancel}
-      footer={(_, __) => {
-        const showCancel = active?.type !== "ALERT";
-        return (
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-            {showCancel && (
-              <Button onClick={onCancel}>
-                取消
-              </Button>
-            )}
-            <Button type="primary" onClick={onOk}>
-              确定
-            </Button>
-          </div>
-        );
-      }}
+      footer={
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          {showCancel && <Button onClick={onCancel}>取消</Button>}
+          <Button type="primary" onClick={onOk}>
+            确定
+          </Button>
+        </div>
+      }
     >
       {content}
     </Modal>

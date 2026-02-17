@@ -9,12 +9,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@render/event-bus": "workspace:*",
-    "@render/graphics-kernel": "workspace:*",
-    "@render/integration-graphics": "workspace:*",
-    "@render/integration-rendering": "workspace:*",
-    "@render/renderer-canvas2d": "workspace:*",
-    "@render/ui-shell": "workspace:*",
+    "@render/event-bus": "*",
+    "@render/graphics-kernel": "*",
+    "@render/integration-graphics": "*",
+    "@render/integration-rendering": "*",
+    "@render/renderer-canvas2d": "*",
+    "@render/ui-shell": "*",
     "antd": "^5.23.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

@@ -1,5 +1,4 @@
 import type { Point, Rect } from "../math/types.js";
-import type { EntityModel } from "../model/models";
 import type { DrawCommand } from "../view/drawCommands.js";
 
 export type InputModifiers = {
@@ -78,12 +77,13 @@ export type ToolContext = {
   hitTestRect(rect: Rect, mode?: "intersect" | "contain"): string[];
 
   translateSelected(delta: Point): void;
-  rotateSelected(angleDegrees: number): void;
+  rotateSelected(angleDeg: number): void;
   deleteSelection(): void;
-  addEntity(entity: EntityModel): void;
+
+  addEntity(entity: any): void;
+  setGhostEntity(entity: any | null): void;
 
   setEphemeralDrawCommands(commands: DrawCommand[]): void;
-  setGhostEntity(entity: EntityModel | null): void;
 };
 
 export interface Tool {
