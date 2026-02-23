@@ -30,6 +30,7 @@ function resolveTsFromJsExtension() {
 }
 
 export default defineConfig({
+  base: "./",
   plugins: [resolveTsFromJsExtension(), react()],
   server: {
     port: 5173

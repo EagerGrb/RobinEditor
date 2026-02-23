@@ -1,0 +1,39 @@
+name: Build RobinEditor and Sync to RobinOS
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build editor web
+        run: npm run build --workspace @render/editor-web
+
+      - name: Verify build output
+        run: ls -R apps/editor-web/dist
+
+      - name: Push to RobinOS
+        uses: cpina/github-action-push-to-another-repository@main
+        env:
+          API_TOKEN_GITHUB: ${{ secrets.ROBINOS_REPO_TOKEN }}
+        with:
+          source-directory: "apps/editor-web/dist"
+          destination-github-username: "EagerGrb"
+          destination-repository-name: "RobinOS"
+          target-directory: "public/robin-editor"
+          user-email: "action@github.com"
+          target-branch: main
+          commit-message: "chore(editor): update embedded RobinEditor build (automated)"
